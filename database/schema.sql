@@ -155,6 +155,11 @@ CREATE POLICY "calls_update_party" ON public.calls
 -- ============================================================
 
 -- Find the 1-to-1 conversation with another user, or create it.
+-- NOTE: the parameter used to be named p_other; it is now p_user_id.
+-- PostgreSQL does not allow CREATE OR REPLACE to rename a parameter
+-- (error 42P13), so drop the old function first. Safe: nothing in the
+-- database depends on this function (it is only called via RPC).
+DROP FUNCTION IF EXISTS public.get_or_create_conversation(uuid);
 CREATE OR REPLACE FUNCTION public.get_or_create_conversation(p_user_id uuid)
 RETURNS uuid
 LANGUAGE plpgsql
