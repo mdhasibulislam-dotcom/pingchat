@@ -2,6 +2,7 @@
 import { sb, PC, toast, avatarHtml, timeAgo, fmtTime, fmtDate, icon, onPresenceChange } from './config.js';
 import { esc, debounce } from './ui.js';
 import { startCall } from './calls.js';
+import { openProfilePreview } from './friends.js';
 
 let me = null;
 let conversations = [];       // [{id, other, lastMessage, unread, lastAt}]
@@ -24,7 +25,7 @@ export function initChats(user) {
   $('msgInput').addEventListener('input', onTypingInput);
   $('audioCallBtn').addEventListener('click', () => { if (activeId && activeOther) startCall(activeId, activeOther, 'audio'); });
   $('videoCallBtn').addEventListener('click', () => { if (activeId && activeOther) startCall(activeId, activeOther, 'video'); });
-  $('chatWho').addEventListener('click', () => { if (activeOther) toast(activeOther.full_name + ' — @' + activeOther.username); });
+  $('chatWho').addEventListener('click', () => { if (activeOther) openProfilePreview(activeOther); });
   onPresenceChange(() => { renderConversationLists(); renderChatHeader(); });
 
   // Global feed: any new message refreshes the list (and the open chat).
@@ -63,7 +64,7 @@ export async function refreshConversations() {
   const otherIds = [...new Set((allPartsR.data || []).map((p) => p.user_id).filter((id) => id !== me.id))];
   let profilesById = new Map();
   if (otherIds.length) {
-    const pr = await sb.from('profiles').select('id, username, full_name, bio, avatar_url').in('id', otherIds);
+    const pr = await sb.from('profiles').select('id, username, full_name, bio, avatar_url, is_public, created_at').in('id', otherIds);
     if (!pr.error) profilesById = new Map((pr.data || []).map((p) => [p.id, p]));
   }
   const msgsByConv = new Map();
@@ -140,7 +141,7 @@ export async function openConversation(id) {
       const otherPart = (parts.data || []).find((p) => p.user_id !== me.id);
       otherLastReadAt = otherPart ? otherPart.last_read_at : null;
       if (otherPart && !activeOther) {
-        const pr = await sb.from('profiles').select('id, username, full_name, bio, avatar_url').eq('id', otherPart.user_id).maybeSingle();
+        const pr = await sb.from('profiles').select('id, username, full_name, bio, avatar_url, is_public, created_at').eq('id', otherPart.user_id).maybeSingle();
         if (pr.data) activeOther = pr.data;
       }
     }

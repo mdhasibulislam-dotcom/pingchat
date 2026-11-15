@@ -110,7 +110,6 @@
     <div class="me-card" id="meCard" role="button" tabindex="0" title="Open my profile">
       <span id="meAvatar"></span>
       <span class="who"><b id="meName">…</b><span id="meSub">View profile</span></span>
-      <span id="meLogoutBtn"></span>
     </div>
   </aside>
 
@@ -144,21 +143,38 @@
       </form>
     </section>
 
-    <!-- Calls history -->
+    <!-- Calls: friends to call + history -->
     <section class="view" id="view-calls" hidden>
-      <div class="view-head"><h2>Calls</h2><p>Your recent audio and video calls.</p></div>
-      <div class="view-pad"><div class="call-list" id="callsList"></div></div>
+      <div class="view-head"><h2>Calls</h2><p>Call your friends or check recent calls.</p></div>
+      <div class="view-pad">
+        <h3 class="section-title">Call friends</h3>
+        <div class="call-list" id="callFriendsList"></div>
+        <h3 class="section-title" style="margin-top:24px">Recent calls</h3>
+        <div class="call-list" id="callsList"></div>
+      </div>
     </section>
 
-    <!-- People directory -->
+    <!-- People directory + friend requests -->
     <section class="view" id="view-people" hidden>
-      <div class="view-head"><h2>People</h2><p>Everyone on PingChat. Message or call anyone.</p></div>
+      <div class="view-head"><h2>People</h2><p>Everyone on PingChat. Add friends to start chatting.</p></div>
       <div class="view-pad">
-        <div class="search-box" style="max-width:420px;margin-bottom:16px">
-          <span id="peopleSearchIcon"></span>
-          <input class="input" id="peopleSearch" type="search" placeholder="Search by name or username" autocomplete="off">
+        <div class="sub-tabs">
+          <button class="sub-tab active" id="peopleTabAll" type="button">All users</button>
+          <button class="sub-tab" id="peopleTabRequests" type="button">Requests <span class="req-badge" id="requestsBadge" hidden></span></button>
         </div>
-        <div class="people-grid" id="peopleGrid"></div>
+        <div id="peopleAllWrap">
+          <div class="search-box" style="max-width:420px;margin-bottom:16px">
+            <span id="peopleSearchIcon"></span>
+            <input class="input" id="peopleSearch" type="search" placeholder="Search by name or username" autocomplete="off">
+          </div>
+          <div class="people-grid" id="peopleGrid"></div>
+        </div>
+        <div id="peopleReqWrap" hidden>
+          <h3 class="section-title">Incoming requests</h3>
+          <div class="req-list" id="incomingList"></div>
+          <h3 class="section-title" style="margin-top:24px">Outgoing requests</h3>
+          <div class="req-list" id="outgoingList"></div>
+        </div>
       </div>
     </section>
 
@@ -166,32 +182,84 @@
     <section class="view" id="view-profile" hidden>
       <div class="view-head"><h2>My profile</h2><p>How other people see you on PingChat.</p></div>
       <div class="view-pad"><div class="profile-wrap">
-        <div class="card">
-          <div class="profile-top">
+        <div class="card profile-hero">
+          <div class="avatar-wrap">
             <span id="profileAvatar"></span>
-            <div><b id="profileHeadName" style="font-size:18px">…</b><br><span class="hint" id="profileHeadUser"></span></div>
+            <button class="avatar-upload-btn" id="avatarUploadBtn" type="button" aria-label="Change profile photo"></button>
+            <input type="file" id="avatarFileInput" accept="image/*" hidden>
           </div>
-          <div id="profileMsg" class="form-msg" hidden role="alert"></div>
-          <form id="profileForm" novalidate>
-            <div class="field"><label for="pfName">Full name</label>
-              <input class="input" id="pfName" type="text" maxlength="60" required></div>
-            <div class="field"><label for="pfUsername">Username</label>
-              <input class="input" id="pfUsername" type="text" maxlength="20" autocapitalize="none" spellcheck="false" required>
-              <span class="hint" id="pfUnameHint">3–20 characters: letters, numbers, underscore.</span></div>
-            <div class="field"><label for="pfBio">Bio</label>
-              <input class="input" id="pfBio" type="text" maxlength="120" placeholder="A short line about you"></div>
-            <div class="field"><label for="pfAvatar">Photo URL (optional)</label>
-              <input class="input" id="pfAvatar" type="url" placeholder="https://…"></div>
-            <button class="btn btn-primary" id="pfSaveBtn" type="submit">Save changes</button>
+          <b class="profile-name" id="profileHeadName">…</b>
+          <span class="hint" id="profileHeadUser"></span>
+          <p class="profile-bio" id="profileHeadBio"></p>
+          <p class="hint" id="profileMemberSince"></p>
+          <div class="stat-row">
+            <div class="stat"><b id="statFriends">0</b><span>Friends</span></div>
+            <div class="stat"><b id="statChats">0</b><span>Chats</span></div>
+          </div>
+          <p class="hint" id="profileEmail"></p>
+          <button class="btn btn-ghost" id="profileEditBtn" type="button">Edit profile</button>
+          <div id="profileEditForm" hidden>
+            <div id="profileMsg" class="form-msg" hidden role="alert"></div>
+            <form id="profileForm" novalidate>
+              <div class="field"><label for="pfName">Full name</label>
+                <input class="input" id="pfName" type="text" maxlength="60" required></div>
+              <div class="field"><label for="pfUsername">Username</label>
+                <input class="input" id="pfUsername" type="text" maxlength="20" autocapitalize="none" spellcheck="false" required>
+                <span class="hint" id="pfUnameHint">3–20 characters: letters, numbers, underscore.</span></div>
+              <div class="field"><label for="pfBio">Bio</label>
+                <input class="input" id="pfBio" type="text" maxlength="120" placeholder="A short line about you"></div>
+              <button class="btn btn-primary" id="pfSaveBtn" type="submit">Save changes</button>
+              <button class="btn btn-ghost" id="pfCancelBtn" type="button">Cancel</button>
+            </form>
+          </div>
+        </div>
+        <button class="btn btn-primary btn-block" id="goSettingsBtn" type="button">Settings</button>
+      </div></div>
+    </section>
+
+    <!-- Settings -->
+    <section class="view" id="view-settings" hidden>
+      <div class="view-head settings-head">
+        <button class="icon-btn" id="settingsBackBtn" type="button" aria-label="Back to profile"></button>
+        <div><h2>Settings</h2><p>Appearance, privacy, sound and security.</p></div>
+      </div>
+      <div class="view-pad"><div class="profile-wrap">
+        <div class="card">
+          <h3>Appearance</h3>
+          <button class="menu-row" id="settingsThemeRow" type="button"><span id="settingsThemeIcon"></span><span id="settingsThemeLabel">Switch to dark theme</span></button>
+        </div>
+        <div class="card">
+          <h3>Privacy</h3>
+          <p class="hint" style="margin-top:0">Profile visibility — Public: anyone can see your full profile info. Private: only your friends can see it; strangers see only your name and photo.</p>
+          <div class="setting-row">
+            <span id="privacyStateLabel">Public profile</span>
+            <button class="switch" id="privacyToggle" type="button" role="switch" aria-checked="true"><span class="knob"></span></button>
+          </div>
+        </div>
+        <div class="card">
+          <h3>Sound</h3>
+          <div class="setting-row">
+            <span>Incoming call ringtone</span>
+            <button class="switch" id="ringtoneToggle" type="button" role="switch" aria-checked="true"><span class="knob"></span></button>
+          </div>
+        </div>
+        <div class="card">
+          <h3>Security</h3>
+          <div id="changePassMsg" class="form-msg" hidden role="alert"></div>
+          <form id="changePassForm" novalidate>
+            <div class="field"><label for="setPass1">New password</label>
+              <div class="input-wrap"><input class="input" id="setPass1" type="password" autocomplete="new-password" required>
+              <button class="toggle-pass" type="button" data-toggle-pass aria-label="Show password"></button></div></div>
+            <div class="field"><label for="setPass2">Confirm new password</label>
+              <div class="input-wrap"><input class="input" id="setPass2" type="password" autocomplete="new-password" required>
+              <button class="toggle-pass" type="button" data-toggle-pass aria-label="Show password"></button></div></div>
+            <button class="btn btn-primary" id="changePassBtn" type="submit">Change password</button>
           </form>
         </div>
         <div class="card">
-          <h3>Settings</h3>
-          <button class="menu-row" id="themeRow" type="button"><span id="themeRowIcon"></span><span>Appearance — switch light / dark</span></button>
-          <button class="menu-row" id="callsRow" type="button"><span id="callsRowIcon"></span><span>Recent calls</span></button>
-          <button class="menu-row danger" id="logoutBtn" type="button"><span id="logoutIcon"></span><span>Log out</span></button>
+          <h3>Account</h3>
+          <button class="btn btn-danger btn-block" id="settingsLogoutBtn" type="button">Log out</button>
         </div>
-        <p class="hint" id="profileEmail"></p>
       </div></div>
     </section>
 
@@ -229,6 +297,18 @@
       <button class="btn btn-danger" id="declineBtn" type="button">Decline</button>
       <button class="btn btn-primary" id="acceptBtn" type="button">Accept</button>
     </div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="profileModal" hidden>
+  <div class="modal profile-modal" role="dialog" aria-label="Profile">
+    <button class="icon-btn modal-close" id="pvClose" type="button" aria-label="Close"></button>
+    <span id="pvAvatar"></span>
+    <h3 id="pvName">…</h3>
+    <p id="pvUsername"></p>
+    <div id="pvDetails"></div>
+    <p class="pv-note" id="pvNote" hidden></p>
+    <div class="actions" id="pvActions"></div>
   </div>
 </div>
 

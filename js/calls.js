@@ -3,11 +3,12 @@
  * Media: peer-to-peer WebRTC, Google free STUN (see js/call-config.js).
  * Call rows live in the `calls` table (status: ringing/accepted/declined/missed/ended).
  */
-import { sb, PC, toast, avatarHtml, timeAgo, icon } from './config.js';
+import { sb, PC, toast, avatarHtml, timeAgo, icon, ringtoneEnabled } from './config.js';
 import { ICE_SERVERS, CALL_TIMEOUT_MS } from './call-config.js';
 import { esc, formatDuration } from './ui.js';
 import { getOrCreateConversation } from './chats.js';
 import { setCallHistoryRefresher } from './app.js';
+import { loadFriendProfiles } from './friends.js';
 
 let me = null;
 let myChannel = null;
@@ -58,6 +59,7 @@ async function updateCall(callId, patch) {
 
 /* ---------- ringtone (WebAudio only, no audio file) ---------- */
 function startRingtone() {
+  if (!ringtoneEnabled()) return; // Settings > Sound > Ringtone off
   try {
     stopRingtone();
     const AC = window.AudioContext || window.webkitAudioContext;
@@ -424,6 +426,59 @@ export function endCallLocal() {
 
 export function endCallIfActive() {
   if (current) endCallLocal();
+}
+
+/* ---------- "Call friends" section ----------
+ * The union of accepted friends and people with an existing conversation
+ * with me. Everyone here is a friend by construction, so call buttons
+ * are always shown. */
+export async function renderCallFriends() {
+  const list = $('callFriendsList');
+  if (!list || !me) return;
+  let friendProfiles = [];
+  try { friendProfiles = await loadFriendProfiles(); } catch (e) { /* ignore */ }
+  let partnerIds = [];
+  try {
+    const myParts = await sb.from('conversation_participants').select('conversation_id').eq('user_id', me.id);
+    const convIds = (myParts.data || []).map((p) => p.conversation_id);
+    if (convIds.length) {
+      const others = await sb.from('conversation_participants').select('user_id').in('conversation_id', convIds).neq('user_id', me.id);
+      partnerIds = [...new Set((others.data || []).map((p) => p.user_id))];
+    }
+  } catch (e) { /* ignore */ }
+  const byId = new Map(friendProfiles.map((p) => [p.id, p]));
+  const missing = partnerIds.filter((id) => !byId.has(id));
+  if (missing.length) {
+    try {
+      const pr = await sb.from('profiles').select('id, username, full_name, bio, avatar_url, is_public, created_at').in('id', missing);
+      (pr.data || []).forEach((p) => byId.set(p.id, p));
+    } catch (e) { /* ignore */ }
+  }
+  const rows = [...byId.values()].sort((a, b) => (a.full_name || a.username || '').localeCompare(b.full_name || b.username || ''));
+  if (!rows.length) {
+    list.innerHTML = '<div class="empty">' + icon('users', 48) + '<h3>No friends yet</h3><p>Add friends from People to call them here.</p></div>';
+    return;
+  }
+  list.innerHTML = rows.map((p) => {
+    const online = PC.state.online.has(p.id);
+    return '<div class="call-row">'
+      + avatarHtml(p, 'sm')
+      + '<span class="c-body"><b>' + esc(p.full_name || p.username) + '</b><span>@' + esc(p.username) + (online ? ' · Online' : '') + '</span></span>'
+      + '<button class="btn btn-ghost btn-sm" data-call-audio="' + p.id + '" type="button" aria-label="Audio call">' + icon('phone', 16) + '</button>'
+      + '<button class="btn btn-ghost btn-sm" data-call-video="' + p.id + '" type="button" aria-label="Video call">' + icon('video', 16) + '</button>'
+      + '</div>';
+  }).join('');
+  list.querySelectorAll('[data-call-audio], [data-call-video]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const peerId = btn.dataset.callAudio || btn.dataset.callVideo;
+      const kind = btn.dataset.callVideo ? 'video' : 'audio';
+      const peer = byId.get(peerId);
+      if (!peer) return;
+      const convId = await getOrCreateConversation(peerId);
+      if (!convId) return;
+      startCall(convId, peer, kind);
+    });
+  });
 }
 
 /* ---------- call history ---------- */

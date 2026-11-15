@@ -4,10 +4,13 @@
 -- conversations and messages are kept). Works on the existing project
 -- (https://fonkaiopgphesajcweej.supabase.co) or on a fresh one.
 --
--- Tables: profiles, conversations, conversation_participants, messages, calls
--- Functions: get_or_create_conversation, is_username_available
+-- Tables: profiles, conversations, conversation_participants, messages, calls,
+--         friendships
+-- Functions: get_or_create_conversation, is_username_available,
+--            send_friend_request, respond_friend_request, friendship_status
 -- Triggers: profiles updated_at, messages -> conversations.last_message_at,
 --           auth.users -> auto-create profile row on signup
+-- Storage: 'avatars' bucket (public, 2 MB, images only) for profile photos
 
 -- ============================================================
 -- 1. TABLES
@@ -19,9 +22,12 @@ CREATE TABLE IF NOT EXISTS public.profiles (
   full_name text NOT NULL DEFAULT '',
   bio text,
   avatar_url text,
+  is_public boolean NOT NULL DEFAULT true,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+-- Existing projects created before is_public existed get the column here.
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS is_public boolean NOT NULL DEFAULT true;
 
 CREATE TABLE IF NOT EXISTS public.conversations (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -161,6 +167,17 @@ DECLARE
 BEGIN
   IF v_me IS NULL THEN RAISE EXCEPTION 'not authenticated'; END IF;
   IF p_user_id = v_me THEN RAISE EXCEPTION 'cannot start a conversation with yourself'; END IF;
+
+  -- Friend system: you can only chat with someone after a friend request
+  -- has been accepted. (The §6/§7 migration auto-creates accepted
+  -- friendships for pairs who already had a conversation, so old chats
+  -- keep working.)
+  IF NOT EXISTS (SELECT 1 FROM friendships
+                 WHERE status = 'accepted'
+                   AND ((requester_id = v_me AND addressee_id = p_user_id)
+                     OR (requester_id = p_user_id AND addressee_id = v_me))) THEN
+    RAISE EXCEPTION 'not friends yet — send a friend request first';
+  END IF;
 
   SELECT c.id INTO v_conv_id
   FROM conversations c
@@ -360,3 +377,228 @@ END $$;
 UPDATE public.conversations c SET last_message_at = m.max_created
 FROM (SELECT conversation_id, max(created_at) AS max_created FROM public.messages GROUP BY conversation_id) m
 WHERE m.conversation_id = c.id AND c.last_message_at IS NULL;
+
+-- Friendships for old chats: every pair that already shares a 1-to-1
+-- conversation becomes friends automatically, so their chats keep working
+-- under the friend system. Guarded: on the very first run of this file the
+-- friendships table is only created in §7 (below), so this block is skipped
+-- then and §7 runs the same backfill right after creating the table. On
+-- later runs both blocks are no-ops thanks to the NOT EXISTS check.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'friendships') THEN
+    EXECUTE $q$
+      WITH pairs AS (
+        SELECT a.user_id AS u1, b.user_id AS u2
+        FROM public.conversation_participants a
+        JOIN public.conversation_participants b
+          ON b.conversation_id = a.conversation_id AND b.user_id > a.user_id
+        WHERE (SELECT count(*) FROM public.conversation_participants p
+               WHERE p.conversation_id = a.conversation_id) = 2
+      )
+      INSERT INTO public.friendships (requester_id, addressee_id, status)
+      SELECT LEAST(u1, u2), GREATEST(u1, u2), 'accepted' FROM pairs
+      WHERE NOT EXISTS (
+        SELECT 1 FROM public.friendships f
+        WHERE LEAST(f.requester_id, f.addressee_id) = LEAST(u1, u2)
+          AND GREATEST(f.requester_id, f.addressee_id) = GREATEST(u1, u2)
+      )
+    $q$;
+  END IF;
+END $$;
+
+-- ============================================================
+-- 7. FRIEND SYSTEM + PRIVACY + PROFILE PHOTO STORAGE
+-- Nobody can message or call anyone until a friend request is sent and
+-- accepted. get_or_create_conversation (§3) enforces this.
+-- profiles.is_public: public profiles show full info to everyone;
+-- private profiles show full info only to friends or while a friend
+-- request is pending (either direction) — the app enforces this when
+-- rendering. The directory list always shows avatar + name + username.
+-- Profile photos live in the public 'avatars' Storage bucket (free tier).
+-- ============================================================
+
+-- profiles.is_public for projects created before this column existed.
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS is_public boolean NOT NULL DEFAULT true;
+
+-- ---- friendships table ----
+CREATE TABLE IF NOT EXISTS public.friendships (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  requester_id uuid NOT NULL REFERENCES auth.users (id) ON DELETE CASCADE,
+  addressee_id uuid NOT NULL REFERENCES auth.users (id) ON DELETE CASCADE,
+  status text NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'accepted', 'declined')),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CHECK (requester_id <> addressee_id)
+);
+-- One friendship row per pair, in either direction.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_friendships_pair
+  ON public.friendships ((LEAST(requester_id, addressee_id)), (GREATEST(requester_id, addressee_id)));
+CREATE INDEX IF NOT EXISTS idx_friendships_requester ON public.friendships (requester_id);
+CREATE INDEX IF NOT EXISTS idx_friendships_addressee ON public.friendships (addressee_id);
+
+-- Keep friendships.updated_at fresh.
+DROP TRIGGER IF EXISTS friendships_updated_at ON public.friendships;
+CREATE TRIGGER friendships_updated_at
+  BEFORE UPDATE ON public.friendships
+  FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+-- ---- friendships RLS ----
+ALTER TABLE public.friendships ENABLE ROW LEVEL SECURITY;
+-- Either side of the friendship can read the row.
+DROP POLICY IF EXISTS "friendships_select_party" ON public.friendships;
+CREATE POLICY "friendships_select_party" ON public.friendships
+  FOR SELECT TO authenticated USING (requester_id = auth.uid() OR addressee_id = auth.uid());
+-- Only the requester can create a row, and only as themselves.
+DROP POLICY IF EXISTS "friendships_insert_requester" ON public.friendships;
+CREATE POLICY "friendships_insert_requester" ON public.friendships
+  FOR INSERT TO authenticated WITH CHECK (requester_id = auth.uid());
+-- Only the addressee can accept/decline a pending row.
+DROP POLICY IF EXISTS "friendships_update_addressee" ON public.friendships;
+CREATE POLICY "friendships_update_addressee" ON public.friendships
+  FOR UPDATE TO authenticated
+  USING (addressee_id = auth.uid() AND status = 'pending')
+  WITH CHECK (addressee_id = auth.uid());
+-- Only the requester can delete their own pending row (cancel request).
+DROP POLICY IF EXISTS "friendships_delete_requester" ON public.friendships;
+CREATE POLICY "friendships_delete_requester" ON public.friendships
+  FOR DELETE TO authenticated USING (requester_id = auth.uid() AND status = 'pending');
+
+-- ---- friendship functions ----
+-- Send a friend request. Rejects self-requests and duplicate rows; a
+-- previous 'declined' row is removed first so a fresh request is allowed.
+CREATE OR REPLACE FUNCTION public.send_friend_request(p_user_id uuid)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_me uuid := auth.uid();
+BEGIN
+  IF v_me IS NULL THEN RAISE EXCEPTION 'not authenticated'; END IF;
+  IF p_user_id = v_me THEN RAISE EXCEPTION 'cannot send a friend request to yourself'; END IF;
+  DELETE FROM friendships
+  WHERE status = 'declined'
+    AND ((requester_id = v_me AND addressee_id = p_user_id)
+      OR (requester_id = p_user_id AND addressee_id = v_me));
+  IF EXISTS (SELECT 1 FROM friendships
+             WHERE (requester_id = v_me AND addressee_id = p_user_id)
+                OR (requester_id = p_user_id AND addressee_id = v_me)) THEN
+    RAISE EXCEPTION 'a friend request already exists for this person';
+  END IF;
+  INSERT INTO friendships (requester_id, addressee_id, status)
+  VALUES (v_me, p_user_id, 'pending');
+END;
+$$;
+
+-- Accept (p_accept = true) or decline a pending request. Only the
+-- addressee of the request can call this, and only on a pending row.
+CREATE OR REPLACE FUNCTION public.respond_friend_request(p_requester_id uuid, p_accept boolean)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_me uuid := auth.uid();
+BEGIN
+  IF v_me IS NULL THEN RAISE EXCEPTION 'not authenticated'; END IF;
+  UPDATE friendships
+  SET status = CASE WHEN p_accept THEN 'accepted' ELSE 'declined' END
+  WHERE requester_id = p_requester_id AND addressee_id = v_me AND status = 'pending';
+  IF NOT FOUND THEN RAISE EXCEPTION 'no pending friend request from this person'; END IF;
+END;
+$$;
+
+-- 'none' | 'pending_out' | 'pending_in' | 'friends' | 'declined'
+-- from the caller's point of view.
+CREATE OR REPLACE FUNCTION public.friendship_status(p_user_id uuid)
+RETURNS text
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT COALESCE((
+    SELECT CASE
+      WHEN f.status = 'accepted' THEN 'friends'
+      WHEN f.status = 'pending' AND f.requester_id = auth.uid() THEN 'pending_out'
+      WHEN f.status = 'pending' AND f.addressee_id = auth.uid() THEN 'pending_in'
+      WHEN f.status = 'declined' THEN 'declined'
+      ELSE 'none'
+    END
+    FROM friendships f
+    WHERE (f.requester_id = auth.uid() AND f.addressee_id = p_user_id)
+       OR (f.requester_id = p_user_id AND f.addressee_id = auth.uid())
+    LIMIT 1
+  ), 'none');
+$$;
+
+-- ---- friendships realtime (for the live People badge) ----
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables
+    WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'friendships'
+  ) THEN
+    EXECUTE 'ALTER PUBLICATION supabase_realtime ADD TABLE public.friendships';
+  END IF;
+END $$;
+
+-- ---- backfill accepted friendships for existing 1-to-1 conversations ----
+-- Same backfill as §6 (which runs first and skips when the table does not
+-- exist yet). Here the table exists, so this covers the first run too.
+WITH pairs AS (
+  SELECT a.user_id AS u1, b.user_id AS u2
+  FROM public.conversation_participants a
+  JOIN public.conversation_participants b
+    ON b.conversation_id = a.conversation_id AND b.user_id > a.user_id
+  WHERE (SELECT count(*) FROM public.conversation_participants p
+         WHERE p.conversation_id = a.conversation_id) = 2
+)
+INSERT INTO public.friendships (requester_id, addressee_id, status)
+SELECT LEAST(u1, u2), GREATEST(u1, u2), 'accepted' FROM pairs
+WHERE NOT EXISTS (
+  SELECT 1 FROM public.friendships f
+  WHERE LEAST(f.requester_id, f.addressee_id) = LEAST(u1, u2)
+    AND GREATEST(f.requester_id, f.addressee_id) = GREATEST(u1, u2)
+);
+
+-- ============================================================
+-- 8. STORAGE BUCKET 'avatars' — profile photos
+-- Public bucket, 2 MB limit, images only. Files live at
+-- <userId>/<timestamp>.<ext>; each user can only write inside their
+-- own folder. Re-running is safe (ON CONFLICT ... DO UPDATE).
+-- ============================================================
+
+INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+VALUES ('avatars', 'avatars', true, 2097152,
+        ARRAY['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
+ON CONFLICT (id) DO UPDATE SET
+  public = EXCLUDED.public,
+  file_size_limit = EXCLUDED.file_size_limit,
+  allowed_mime_types = EXCLUDED.allowed_mime_types;
+
+-- Anyone can read profile photos.
+DROP POLICY IF EXISTS "avatars_public_read" ON storage.objects;
+CREATE POLICY "avatars_public_read" ON storage.objects
+  FOR SELECT TO public USING (bucket_id = 'avatars');
+-- Only the owner can upload into their own folder.
+DROP POLICY IF EXISTS "avatars_insert_own" ON storage.objects;
+CREATE POLICY "avatars_insert_own" ON storage.objects
+  FOR INSERT TO authenticated WITH CHECK (
+    bucket_id = 'avatars' AND (storage.foldername(name))[1] = auth.uid()::text
+  );
+-- Only the owner can replace their own photo.
+DROP POLICY IF EXISTS "avatars_update_own" ON storage.objects;
+CREATE POLICY "avatars_update_own" ON storage.objects
+  FOR UPDATE TO authenticated
+  USING (bucket_id = 'avatars' AND (storage.foldername(name))[1] = auth.uid()::text)
+  WITH CHECK (bucket_id = 'avatars' AND (storage.foldername(name))[1] = auth.uid()::text);
+-- Only the owner can delete their own photo.
+DROP POLICY IF EXISTS "avatars_delete_own" ON storage.objects;
+CREATE POLICY "avatars_delete_own" ON storage.objects
+  FOR DELETE TO authenticated USING (
+    bucket_id = 'avatars' AND (storage.foldername(name))[1] = auth.uid()::text
+  );

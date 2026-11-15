@@ -9,15 +9,19 @@ Same features as the original PingChat, rebuilt from scratch as a single-page ap
 - **Auth** — email + password login / register, unique usernames (3–20 chars, live availability check), forgot / reset password, email confirmation flow.
 - **Chats** — conversation list with unread badges and last-message preview, realtime messages, typing indicator, read ticks (sent / read), 200-message history.
 - **Audio & video calls** — WebRTC peer-to-peer calls with Supabase Realtime Broadcast signaling. Incoming-call modal with ringtone, mute / camera toggles, live timer, call history with call-back buttons, 30-second no-answer → missed.
-- **People** — directory of all registered users with search, online status, Message / audio-call / video-call buttons.
-- **Profile** — edit full name, username, bio and photo URL; light/dark theme toggle; log out.
+- **Friends** — everyone is listed in People, but nobody can message or call anyone until a friend request is sent and accepted. People rows and the profile preview show state-aware actions: Add Friend, Request sent + Cancel, Accept + Decline, or (for friends) Message + audio/video call buttons. A Requests tab lists incoming requests (Accept / Decline + View profile) and outgoing requests (Cancel), with a badge count of incoming requests.
+- **Profile** — redesigned hero: large avatar with a photo-upload button, full name, @username, bio, member-since date, friends + chats stats, and an Edit button that toggles the edit form. Real photo upload to Supabase Storage (bucket `avatars`, free) — no photo-URL field. A prominent Settings button sits at the bottom.
+- **Settings** (`#/settings`) — Appearance (light/dark theme, also in the top bar), Privacy (profile visibility Public / Private), Sound (incoming-call ringtone on/off), Security (change password), and Log out. **Log out lives only here** — there is no logout button anywhere else.
+- **Privacy** — public profiles show full info (bio, member-since, friend status) to everyone. Private profiles show full info only to friends, or while a friend request is pending either way — so a request recipient can inspect the sender before accepting. Otherwise only avatar, name and username are shown, with a "This profile is private" note. The directory list itself always shows avatar + name + username so people can be identified.
+- **Calls** — two sections: "Call friends" (accepted friends plus people you already have a conversation with, each with audio + video call buttons) and "Recent calls" (call history with call-back buttons).
 - **Presence** — online dots via Supabase Presence.
 
 ## Tech
 
-- No build step. One `index.html` shell, ES modules, hash routing (`#/login`, `#/chats`, `#/chat/<id>`, `#/calls`, `#/people`, `#/profile`).
+- No build step. One `index.html` shell, ES modules, hash routing (`#/login`, `#/chats`, `#/chat/<id>`, `#/calls`, `#/people`, `#/profile`, `#/settings`).
 - **Supabase Auth** (free) — email/password.
-- **Supabase Postgres + Realtime** (free) — messages, conversations, calls, presence, broadcast signaling.
+- **Supabase Postgres + Realtime** (free) — messages, conversations, calls, friendships, presence, broadcast signaling.
+- **Supabase Storage** (free) — profile photos in the public `avatars` bucket (2 MB limit, images only).
 - **WebRTC** — peer-to-peer media, Google free public STUN servers.
 - Works from GitHub Pages over plain HTTP(S).
 
@@ -32,8 +36,10 @@ js/app.js             Bootstrap + hash router + auth guard + presence
 js/auth.js            Login / register / forgot / reset / logout
 js/chats.js           Conversations, messages, typing, read ticks
 js/calls.js           WebRTC call engine + call UI + call history
-js/people.js          People directory
-js/profile.js         Own profile editor
+js/people.js          People directory + friend requests (tabs, actions)
+js/friends.js         Friend system: requests, state, privacy, profile preview
+js/profile.js         Own profile editor + photo upload
+js/settings.js        Settings view (appearance, privacy, sound, password, logout)
 js/ui.js              Small shared helpers (escape, debounce, duration)
 database/schema.sql   Complete idempotent SQL schema
 assets/icons/         Logo + favicon (emerald)
@@ -49,15 +55,22 @@ on the same project; existing users, conversations and messages are kept.
 
 > **SQL files you need to run:** `database/schema.sql` — that is the only SQL
 > file. It creates the tables (`profiles`, `conversations`,
-> `conversation_participants`, `messages`, `calls`), RLS policies, the
-> `get_or_create_conversation` and `is_username_available` functions, the
-> triggers, and enables Realtime for `messages`, `calls` and
-> `conversation_participants`.
+> `conversation_participants`, `messages`, `calls`, `friendships`), RLS
+> policies, the `get_or_create_conversation`, `is_username_available`,
+> `send_friend_request`, `respond_friend_request` and `friendship_status`
+> functions, the triggers, the public `avatars` Storage bucket (2 MB, images
+> only) with its storage policies, and enables Realtime for `messages`,
+> `calls`, `conversation_participants` and `friendships`.
 
 The app is already pointed at the existing project
 `https://fonkaiopgphesajcweej.supabase.co` (see `js/config.js`), so existing
 users keep working. Only the publishable (anon) key is used — never put a
 service_role / secret key in this project.
+
+Re-running the SQL after the friend-system update also **auto-creates
+accepted friendships for every pair that already shares a conversation**, so
+old chats keep working even though new chats now require a friend request.
+It does not delete or change any existing data.
 
 ### 2. Auth URLs (required for email links)
 

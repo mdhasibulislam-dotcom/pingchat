@@ -1,19 +1,20 @@
 /* PingChat v2 — bootstrap, hash router, auth guard, presence, theme.
  * Single-page app: ONE index.html shell, views switched by hash route.
  * Routes: #/login #/register #/reset (signed out)
- *         #/chats #/chat/<id> #/calls #/people #/profile (signed in)
+ *         #/chats #/chat/<id> #/calls #/people #/profile #/settings (signed in)
  * Root URL (#/ or empty) shows login when signed out, chats when signed in.
  * There is deliberately NO landing page.
  */
 import { sb, PC, toast, avatarHtml, icon, onPresenceChange, emitPresenceChange } from './config.js';
-import { initAuth, ensureProfile, logout, isRecoveryUrl } from './auth.js';
+import { initAuth, ensureProfile, isRecoveryUrl } from './auth.js';
 import { initChats, openConversation, closeChat, refreshConversations } from './chats.js';
-import { initCalls, endCallIfActive } from './calls.js';
+import { initCalls, endCallIfActive, renderCallFriends } from './calls.js';
 import { initPeople, loadPeople } from './people.js';
 import { initProfile, loadProfile } from './profile.js';
+import { initSettings, loadSettings } from './settings.js';
 
 const AUTH_VIEWS = ['login', 'register', 'reset'];
-const APP_VIEWS = ['chats', 'chat', 'calls', 'people', 'profile'];
+const APP_VIEWS = ['chats', 'chat', 'calls', 'people', 'profile', 'settings'];
 
 let session = null;
 let presenceChannel = null;
@@ -35,7 +36,7 @@ function applyTheme(theme) {
   try { localStorage.setItem('pingchat-theme', theme); } catch (e) {}
   const btn = $('themeBtnMobile');
   if (btn) btn.innerHTML = icon(theme === 'dark' ? 'sun' : 'moon', 20);
-  const rowIcon = $('themeRowIcon');
+  const rowIcon = $('settingsThemeIcon');
   if (rowIcon) rowIcon.innerHTML = icon(theme === 'dark' ? 'sun' : 'moon', 20);
 }
 export function toggleTheme() {
@@ -47,7 +48,6 @@ export function initTheme() {
   try { saved = localStorage.getItem('pingchat-theme') || 'light'; } catch (e) {}
   applyTheme(saved === 'dark' ? 'dark' : 'light');
   $('themeBtnMobile').addEventListener('click', toggleTheme);
-  $('themeRow').addEventListener('click', toggleTheme);
 }
 
 /* ---------- view switching ---------- */
@@ -75,9 +75,10 @@ function showAppView(name, param) {
     const tab = el.dataset.nav;
     el.classList.toggle('active', tab === name || (name === 'chat' && tab === 'chats'));
   });
-  if (name === 'calls') refreshCallHistory();
+  if (name === 'calls') { refreshCallHistory(); renderCallFriends(); }
   if (name === 'people') loadPeople();
   if (name === 'profile') loadProfile();
+  if (name === 'settings') loadSettings();
   if (name === 'chat' && param) openConversation(param);
   if (name !== 'chat') closeChat();
 }
@@ -130,8 +131,9 @@ async function setupUser(user) {
   initPresence(user);
   initCalls(user);
   initChats(user);
-  initPeople(user);
+  initPeople(user); // also inits the friend system (js/friends.js)
   initProfile(user);
+  initSettings(user);
   refreshConversations();
 }
 
@@ -147,9 +149,6 @@ async function boot() {
   $('audioCallBtn').innerHTML = icon('phone', 20);
   $('videoCallBtn').innerHTML = icon('video', 20);
   $('sendBtn').innerHTML = icon('send', 20);
-  $('meLogoutBtn').innerHTML = icon('logout', 20);
-  $('callsRowIcon').innerHTML = icon('phone', 20);
-  $('logoutIcon').innerHTML = icon('logout', 20);
   document.querySelectorAll('[data-tab-icon]').forEach((el) => {
     const map = { chats: 'chat', calls: 'phone', people: 'users', profile: 'user' };
     el.innerHTML = icon(map[el.dataset.tabIcon] || 'chat', 22);
@@ -160,10 +159,7 @@ async function boot() {
     el.addEventListener('click', () => { location.hash = '#/' + el.dataset.nav; });
   });
   $('meCard').addEventListener('click', () => { location.hash = '#/profile'; });
-  $('meLogoutBtn').addEventListener('click', (e) => { e.stopPropagation(); logout(); });
   $('topAvatar').addEventListener('click', () => { location.hash = '#/profile'; });
-  $('logoutBtn').addEventListener('click', logout);
-  $('callsRow').addEventListener('click', () => { location.hash = '#/calls'; });
   $('backBtn').addEventListener('click', () => { location.hash = '#/chats'; });
 
   initAuth();
