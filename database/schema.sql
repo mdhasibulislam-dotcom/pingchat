@@ -84,6 +84,27 @@ ALTER TABLE public.conversation_participants ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.messages ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.calls ENABLE ROW LEVEL SECURITY;
 
+-- GRANTS — without these, RLS policies alone are not enough.
+-- Supabase's `authenticated` role needs table privileges in addition
+-- to a passing policy; otherwise writes fail with
+-- "permission denied for table <name>" (error 42501) even when a
+-- policy would allow them. This was the cause of
+-- "Could not send message: permission denied for table messages".
+-- (Reads happened to work because the old project's tables already
+-- carried SELECT grants; INSERT/UPDATE/DELETE were never granted.)
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.profiles TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.conversations TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.conversation_participants TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.messages TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.calls TO authenticated;
+-- (friendships is granted in §7, right after that table is created.)
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO authenticated;
+-- Same grants for any tables created later in this schema.
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO authenticated;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT USAGE, SELECT ON SEQUENCES TO authenticated;
+
 -- profiles: readable by any signed-in user; only self can insert/update.
 DROP POLICY IF EXISTS "profiles_select" ON public.profiles;
 CREATE POLICY "profiles_select" ON public.profiles
@@ -474,6 +495,8 @@ CREATE TRIGGER friendships_updated_at
 
 -- ---- friendships RLS ----
 ALTER TABLE public.friendships ENABLE ROW LEVEL SECURITY;
+-- Table privileges (see §2): RLS policies alone are not enough.
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.friendships TO authenticated;
 -- Either side of the friendship can read the row.
 DROP POLICY IF EXISTS "friendships_select_party" ON public.friendships;
 CREATE POLICY "friendships_select_party" ON public.friendships
