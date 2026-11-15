@@ -95,26 +95,51 @@ DROP POLICY IF EXISTS "profiles_update_self" ON public.profiles;
 CREATE POLICY "profiles_update_self" ON public.profiles
   FOR UPDATE TO authenticated USING (auth.uid() = id) WITH CHECK (auth.uid() = id);
 
+-- ============================================================
+-- RLS HELPER — fixes "infinite recursion detected in policy
+-- for relation conversation_participants" (error 42P17).
+--
+-- The old participants_select policy queried the
+-- conversation_participants table from inside its own policy
+-- (EXISTS ... FROM conversation_participants), so every query on
+-- messages / conversations / participants re-entered the policy
+-- forever. The fix is the standard Supabase pattern: a
+-- SECURITY DEFINER helper that checks membership with RLS
+-- bypassed, so no policy ever queries conversation_participants
+-- directly. All participant checks below go through it.
+-- ============================================================
+CREATE OR REPLACE FUNCTION public.is_conversation_participant(p_conversation_id uuid)
+RETURNS boolean
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM public.conversation_participants
+    WHERE conversation_id = p_conversation_id AND user_id = auth.uid()
+  );
+$$;
+GRANT EXECUTE ON FUNCTION public.is_conversation_participant(uuid) TO authenticated;
+
 -- conversations: readable by participants.
 DROP POLICY IF EXISTS "conversations_select_participant" ON public.conversations;
 CREATE POLICY "conversations_select_participant" ON public.conversations
   FOR SELECT TO authenticated USING (
-    EXISTS (SELECT 1 FROM public.conversation_participants p
-            WHERE p.conversation_id = conversations.id AND p.user_id = auth.uid())
+    public.is_conversation_participant(conversations.id)
   );
 DROP POLICY IF EXISTS "conversations_insert_auth" ON public.conversations;
 CREATE POLICY "conversations_insert_auth" ON public.conversations
   FOR INSERT TO authenticated WITH CHECK (true);
 
--- conversation_participants: readable by self + other participants;
+-- conversation_participants: readable by participants of the
+-- conversation (a participant can see the other participant's row,
+-- which is how the app finds the chat peer). Must use the helper
+-- above — a direct EXISTS on this same table here recurses forever.
 -- insertable by self (used when creating a conversation).
 DROP POLICY IF EXISTS "participants_select" ON public.conversation_participants;
 CREATE POLICY "participants_select" ON public.conversation_participants
   FOR SELECT TO authenticated USING (
-    user_id = auth.uid()
-    OR EXISTS (SELECT 1 FROM public.conversation_participants p2
-               WHERE p2.conversation_id = conversation_participants.conversation_id
-               AND p2.user_id = auth.uid())
+    public.is_conversation_participant(conversation_participants.conversation_id)
   );
 DROP POLICY IF EXISTS "participants_insert_self" ON public.conversation_participants;
 CREATE POLICY "participants_insert_self" ON public.conversation_participants
@@ -127,15 +152,13 @@ CREATE POLICY "participants_update_self" ON public.conversation_participants
 DROP POLICY IF EXISTS "messages_select_participant" ON public.messages;
 CREATE POLICY "messages_select_participant" ON public.messages
   FOR SELECT TO authenticated USING (
-    EXISTS (SELECT 1 FROM public.conversation_participants p
-            WHERE p.conversation_id = messages.conversation_id AND p.user_id = auth.uid())
+    public.is_conversation_participant(messages.conversation_id)
   );
 DROP POLICY IF EXISTS "messages_insert_participant" ON public.messages;
 CREATE POLICY "messages_insert_participant" ON public.messages
   FOR INSERT TO authenticated WITH CHECK (
     sender_id = auth.uid()
-    AND EXISTS (SELECT 1 FROM public.conversation_participants p
-                WHERE p.conversation_id = messages.conversation_id AND p.user_id = auth.uid())
+    AND public.is_conversation_participant(messages.conversation_id)
   );
 
 -- calls: readable / insertable / updatable by caller or callee only.
