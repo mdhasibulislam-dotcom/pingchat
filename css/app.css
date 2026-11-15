@@ -413,3 +413,145 @@ svg.icon { width: 20px; height: 20px; flex: none; }
   .req-row { flex-wrap:wrap }
   .req-actions { width:100%; justify-content:flex-start }
 }
+
+/* ---------- v2.2: compact bubbles, message menu, reactions, reply, voice ---------- */
+/* Bubbles shrink to fit their text (short "Hi" = small bubble). */
+.msg { width: fit-content; max-width: 75%; align-self: flex-start; }
+.msg.me { align-self: flex-end; align-items: flex-end; }
+.msg-row { display: flex; align-items: flex-end; gap: 4px; max-width: 100%; }
+.msg.me .msg-row { flex-direction: row-reverse; }
+.bubble-wrap { min-width: 0; max-width: 100%; display: flex; flex-direction: column; }
+.msg .bubble { width: fit-content; max-width: 100%; }
+.msg.me .bubble-wrap { align-items: flex-end; }
+.msg .meta { align-self: flex-start; }
+.msg.me .meta { align-self: flex-end; }
+
+/* Per-message three-dot menu button (hover on desktop, always on touch). */
+.msg-menu-btn {
+  flex: none; width: 28px; height: 28px; border-radius: 50%; border: none;
+  background: transparent; color: var(--muted);
+  display: inline-flex; align-items: center; justify-content: center;
+  opacity: 0; transition: opacity .15s; cursor: pointer;
+}
+.msg-menu-btn:hover { background: var(--card-2); color: var(--text); }
+.msg:hover .msg-menu-btn, .msg-menu-btn:focus-visible { opacity: 1; }
+@media (hover: none) { .msg-menu-btn { opacity: .55; } }
+
+/* Floating message menu + emoji picker. */
+.msg-menu {
+  position: fixed; z-index: 80; min-width: 190px; max-width: min(92vw, 260px);
+  background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: var(--shadow); padding: 6px;
+}
+.msg-menu-item {
+  display: flex; width: 100%; padding: 9px 12px; background: none; border: none;
+  color: var(--text); font-size: 14px; text-align: left; border-radius: 8px; cursor: pointer;
+}
+.msg-menu-item:hover { background: var(--card-2); }
+.msg-menu-item.danger { color: var(--danger); }
+.emoji-row { display: flex; gap: 2px; padding: 4px; justify-content: space-between; }
+.emoji-row button {
+  background: none; border: none; font-size: 22px; line-height: 1; padding: 6px 4px;
+  border-radius: 8px; cursor: pointer;
+}
+.emoji-row button:hover { background: var(--card-2); }
+
+/* Reaction chips under a bubble. */
+.reactions { display: flex; gap: 4px; margin-top: 4px; flex-wrap: wrap; max-width: 100%; }
+.msg.me .reactions { justify-content: flex-end; }
+.react-chip {
+  background: var(--card); border: 1px solid var(--border); border-radius: 999px;
+  padding: 2px 8px; font-size: 13px; cursor: pointer; line-height: 1.5;
+}
+.react-chip.mine { border-color: var(--primary); background: var(--primary-soft); }
+
+/* Quoted reply above a bubble. */
+.quote {
+  border-left: 3px solid var(--primary); background: var(--card-2);
+  border-radius: 8px; padding: 6px 10px; margin-bottom: 6px; cursor: pointer;
+  max-width: 100%; min-width: 120px;
+}
+.quote b { display: block; font-size: 12px; color: var(--primary); }
+.quote-text {
+  display: block; font-size: 13px; color: var(--text-2);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.msg.flash .bubble { animation: msgflash 1.2s ease; }
+@keyframes msgflash {
+  0%, 100% { box-shadow: var(--shadow); }
+  25%, 60% { box-shadow: 0 0 0 3px var(--primary-soft); }
+}
+
+/* Voice message player inside a bubble. */
+.bubble.voice-bubble { display: flex; flex-direction: column; gap: 4px; min-width: 200px; }
+.voice-player { display: flex; align-items: center; gap: 8px; }
+.voice-play {
+  flex: none; width: 34px; height: 34px; border-radius: 50%; border: none;
+  background: rgba(255, 255, 255, .22); color: inherit;
+  display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
+}
+.msg:not(.me) .voice-play { background: var(--primary-soft); color: var(--primary); }
+.voice-prog {
+  flex: 1; height: 5px; border-radius: 999px; background: rgba(127, 127, 127, .35);
+  cursor: pointer; min-width: 60px; position: relative;
+}
+.voice-prog-fill {
+  display: block; height: 100%; width: 0; border-radius: 999px;
+  background: currentColor; opacity: .85;
+}
+.voice-dur { font-size: 12px; flex: none; opacity: .85; }
+.voice-once { font-size: 11px; opacity: .75; }
+
+/* Reply bar above the composer. */
+.reply-bar {
+  display: flex; align-items: center; gap: 8px; padding: 8px 14px;
+  background: var(--card); border-top: 1px solid var(--border);
+}
+.reply-bar-body {
+  flex: 1; min-width: 0; border-left: 3px solid var(--primary);
+  padding-left: 10px; display: flex; flex-direction: column;
+}
+.reply-bar-body b { font-size: 12px; color: var(--primary); }
+.reply-bar-body span {
+  font-size: 13px; color: var(--text-2);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* Voice recording + preview bars above the composer. */
+.voice-rec, .voice-preview {
+  display: flex; align-items: center; gap: 10px; padding: 10px 14px;
+  background: var(--card); border-top: 1px solid var(--border);
+}
+.rec-dot {
+  width: 12px; height: 12px; border-radius: 50%; background: #DC2626; flex: none;
+  animation: recpulse 1s ease-in-out infinite;
+}
+@keyframes recpulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+.rec-hint { color: var(--muted); font-size: 13px; flex: 1; }
+.voice-preview .voice-prog { flex: 1; }
+#voicePrevPlay { color: var(--primary); }
+
+/* Profile modal: status line + action rows (clear chat / block / report). */
+.pv-status { margin: 2px 0 0; font-size: 14px; color: var(--muted); }
+.pv-status.online { color: var(--primary); }
+#pvDetails { margin-top: 14px; }
+#pvActions { margin-top: 14px; }
+.pv-extra { border-top: 1px solid var(--border); margin-top: 16px; padding-top: 6px; text-align: left; }
+.pv-row {
+  display: flex; width: 100%; padding: 11px 4px; background: none; border: none;
+  color: var(--text); font-size: 15px; text-align: left; cursor: pointer;
+}
+.pv-row:hover { color: var(--primary); }
+.pv-row.danger { color: var(--danger); }
+
+/* Report dialog. */
+.report-reasons { display: flex; flex-direction: column; gap: 6px; text-align: left; margin: 0 0 14px; }
+.report-reasons label {
+  display: flex; gap: 8px; align-items: center; padding: 9px 10px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; font-size: 14px;
+}
+.report-reasons input { accent-color: var(--primary); }
+
+@media (max-width: 820px) {
+  .msg { max-width: 85%; }
+}

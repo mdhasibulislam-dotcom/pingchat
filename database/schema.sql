@@ -5,12 +5,15 @@
 -- (https://fonkaiopgphesajcweej.supabase.co) or on a fresh one.
 --
 -- Tables: profiles, conversations, conversation_participants, messages, calls,
---         friendships
+--         friendships, message_reactions, blocks, reports
 -- Functions: get_or_create_conversation, is_username_available,
---            send_friend_request, respond_friend_request, friendship_status
+--            send_friend_request, respond_friend_request, friendship_status,
+--            delete_message_for_me, delete_message_for_everyone,
+--            clear_chat_for_me, consume_voice_message
 -- Triggers: profiles updated_at, messages -> conversations.last_message_at,
 --           auth.users -> auto-create profile row on signup
--- Storage: 'avatars' bucket (public, 2 MB, images only) for profile photos
+-- Storage: 'avatars' bucket (public, 2 MB, images only) for profile photos,
+--          'voice-messages' bucket (public, 5 MB, audio only) for voice messages
 
 -- ============================================================
 -- 1. TABLES
@@ -49,6 +52,16 @@ CREATE TABLE IF NOT EXISTS public.messages (
   body text NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now()
 );
+-- Message features (reactions, reply, delete, view-once voice).
+-- Added as ALTERs so projects created before these columns existed get them.
+ALTER TABLE public.messages ADD COLUMN IF NOT EXISTS reply_to_id uuid REFERENCES public.messages (id) ON DELETE SET NULL;
+ALTER TABLE public.messages ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'text' CHECK (kind IN ('text', 'voice'));
+ALTER TABLE public.messages ADD COLUMN IF NOT EXISTS media_url text;
+ALTER TABLE public.messages ADD COLUMN IF NOT EXISTS media_path text;
+ALTER TABLE public.messages ADD COLUMN IF NOT EXISTS view_once boolean NOT NULL DEFAULT false;
+ALTER TABLE public.messages ADD COLUMN IF NOT EXISTS consumed_at timestamptz;
+-- Users who deleted this message for themselves (delete-for-me).
+ALTER TABLE public.messages ADD COLUMN IF NOT EXISTS deleted_by uuid[] NOT NULL DEFAULT '{}';
 
 CREATE TABLE IF NOT EXISTS public.calls (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -61,6 +74,35 @@ CREATE TABLE IF NOT EXISTS public.calls (
   started_at timestamptz,
   ended_at timestamptz,
   duration_seconds integer,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- Reactions: one reaction per user per message (PK enforces it).
+CREATE TABLE IF NOT EXISTS public.message_reactions (
+  message_id uuid NOT NULL REFERENCES public.messages (id) ON DELETE CASCADE,
+  user_id uuid NOT NULL REFERENCES auth.users (id) ON DELETE CASCADE,
+  emoji text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (message_id, user_id)
+);
+
+-- Blocks: blocker_id blocked blocked_id. No contact either way while a
+-- row exists (see §2 messages INSERT policy and §3 get_or_create_conversation).
+CREATE TABLE IF NOT EXISTS public.blocks (
+  blocker_id uuid NOT NULL REFERENCES auth.users (id) ON DELETE CASCADE,
+  blocked_id uuid NOT NULL REFERENCES auth.users (id) ON DELETE CASCADE,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (blocker_id, blocked_id),
+  CHECK (blocker_id <> blocked_id)
+);
+
+-- Reports: user reports about another user (no admin review UI).
+CREATE TABLE IF NOT EXISTS public.reports (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  reporter_id uuid NOT NULL REFERENCES auth.users (id) ON DELETE CASCADE,
+  reported_id uuid NOT NULL REFERENCES auth.users (id) ON DELETE CASCADE,
+  reason text NOT NULL,
+  details text,
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
@@ -170,16 +212,34 @@ CREATE POLICY "participants_update_self" ON public.conversation_participants
   FOR UPDATE TO authenticated USING (user_id = auth.uid()) WITH CHECK (user_id = auth.uid());
 
 -- messages: readable by conversation participants; insertable by participants.
+-- A message is hidden from a user who deleted it for themselves
+-- (deleted_by contains their id). Insert is refused when either side
+-- blocked the other (the blocks table is created in §1, above).
 DROP POLICY IF EXISTS "messages_select_participant" ON public.messages;
 CREATE POLICY "messages_select_participant" ON public.messages
   FOR SELECT TO authenticated USING (
     public.is_conversation_participant(messages.conversation_id)
+    AND NOT (auth.uid() = ANY(COALESCE(messages.deleted_by, '{}')))
   );
 DROP POLICY IF EXISTS "messages_insert_participant" ON public.messages;
 CREATE POLICY "messages_insert_participant" ON public.messages
   FOR INSERT TO authenticated WITH CHECK (
     sender_id = auth.uid()
     AND public.is_conversation_participant(messages.conversation_id)
+    AND NOT EXISTS (
+      SELECT 1 FROM public.blocks b
+      JOIN public.conversation_participants p ON p.user_id = b.blocker_id
+      WHERE p.conversation_id = messages.conversation_id
+        AND p.user_id <> auth.uid()
+        AND b.blocked_id = auth.uid()
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM public.blocks b
+      JOIN public.conversation_participants p ON p.user_id = b.blocked_id
+      WHERE p.conversation_id = messages.conversation_id
+        AND p.user_id <> auth.uid()
+        AND b.blocker_id = auth.uid()
+    )
   );
 
 -- calls: readable / insertable / updatable by caller or callee only.
@@ -216,6 +276,14 @@ DECLARE
 BEGIN
   IF v_me IS NULL THEN RAISE EXCEPTION 'not authenticated'; END IF;
   IF p_user_id = v_me THEN RAISE EXCEPTION 'cannot start a conversation with yourself'; END IF;
+
+  -- Blocks: no contact either way while a block row exists.
+  IF EXISTS (SELECT 1 FROM blocks WHERE blocker_id = v_me AND blocked_id = p_user_id) THEN
+    RAISE EXCEPTION 'You blocked this user';
+  END IF;
+  IF EXISTS (SELECT 1 FROM blocks WHERE blocker_id = p_user_id AND blocked_id = v_me) THEN
+    RAISE EXCEPTION 'You cannot message this user';
+  END IF;
 
   -- Friend system: you can only chat with someone after a friend request
   -- has been accepted. (The §6/§7 migration auto-creates accepted
@@ -653,3 +721,217 @@ CREATE POLICY "avatars_delete_own" ON storage.objects
   FOR DELETE TO authenticated USING (
     bucket_id = 'avatars' AND (storage.foldername(name))[1] = auth.uid()::text
   );
+
+-- ============================================================
+-- 9. MESSAGE FEATURES — reactions, reply, delete, view-once
+--    voice, blocks, reports
+-- Tables (message_reactions, blocks, reports) are created in §1 so
+-- the messages INSERT policy in §2 can reference blocks. Their RLS
+-- policies, grants, the voice-messages bucket and the RPCs live here.
+-- ============================================================
+
+-- ---- message_reactions RLS ----
+ALTER TABLE public.message_reactions ENABLE ROW LEVEL SECURITY;
+GRANT SELECT, INSERT, DELETE ON public.message_reactions TO authenticated;
+DROP POLICY IF EXISTS "reactions_select_participant" ON public.message_reactions;
+CREATE POLICY "reactions_select_participant" ON public.message_reactions
+  FOR SELECT TO authenticated USING (
+    EXISTS (SELECT 1 FROM public.messages m
+            WHERE m.id = message_reactions.message_id
+              AND public.is_conversation_participant(m.conversation_id))
+  );
+DROP POLICY IF EXISTS "reactions_insert_own" ON public.message_reactions;
+CREATE POLICY "reactions_insert_own" ON public.message_reactions
+  FOR INSERT TO authenticated WITH CHECK (
+    user_id = auth.uid()
+    AND EXISTS (SELECT 1 FROM public.messages m
+                WHERE m.id = message_reactions.message_id
+                  AND public.is_conversation_participant(m.conversation_id))
+  );
+DROP POLICY IF EXISTS "reactions_delete_own" ON public.message_reactions;
+CREATE POLICY "reactions_delete_own" ON public.message_reactions
+  FOR DELETE TO authenticated USING (user_id = auth.uid());
+CREATE INDEX IF NOT EXISTS idx_reactions_message
+  ON public.message_reactions (message_id);
+
+-- ---- blocks RLS ----
+ALTER TABLE public.blocks ENABLE ROW LEVEL SECURITY;
+GRANT SELECT, INSERT, DELETE ON public.blocks TO authenticated;
+DROP POLICY IF EXISTS "blocks_select_party" ON public.blocks;
+CREATE POLICY "blocks_select_party" ON public.blocks
+  FOR SELECT TO authenticated USING (blocker_id = auth.uid() OR blocked_id = auth.uid());
+DROP POLICY IF EXISTS "blocks_insert_self" ON public.blocks;
+CREATE POLICY "blocks_insert_self" ON public.blocks
+  FOR INSERT TO authenticated WITH CHECK (blocker_id = auth.uid());
+DROP POLICY IF EXISTS "blocks_delete_self" ON public.blocks;
+CREATE POLICY "blocks_delete_self" ON public.blocks
+  FOR DELETE TO authenticated USING (blocker_id = auth.uid());
+CREATE INDEX IF NOT EXISTS idx_blocks_blocker ON public.blocks (blocker_id);
+CREATE INDEX IF NOT EXISTS idx_blocks_blocked ON public.blocks (blocked_id);
+
+-- ---- reports RLS ----
+ALTER TABLE public.reports ENABLE ROW LEVEL SECURITY;
+GRANT SELECT, INSERT ON public.reports TO authenticated;
+DROP POLICY IF EXISTS "reports_insert_self" ON public.reports;
+CREATE POLICY "reports_insert_self" ON public.reports
+  FOR INSERT TO authenticated WITH CHECK (reporter_id = auth.uid());
+DROP POLICY IF EXISTS "reports_select_own" ON public.reports;
+CREATE POLICY "reports_select_own" ON public.reports
+  FOR SELECT TO authenticated USING (reporter_id = auth.uid());
+CREATE INDEX IF NOT EXISTS idx_reports_reported ON public.reports (reported_id);
+
+-- ---- delete / clear / consume RPCs ----
+-- Delete a message for me only: hide it from my own view by recording
+-- my id in deleted_by (the messages SELECT policy hides such rows).
+CREATE OR REPLACE FUNCTION public.delete_message_for_me(p_message_id uuid)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_conv uuid;
+BEGIN
+  SELECT conversation_id INTO v_conv FROM public.messages WHERE id = p_message_id;
+  IF NOT FOUND THEN RETURN false; END IF;
+  IF NOT public.is_conversation_participant(v_conv) THEN
+    RAISE EXCEPTION 'not a participant of this conversation';
+  END IF;
+  UPDATE public.messages
+  SET deleted_by = array_append(deleted_by, auth.uid())
+  WHERE id = p_message_id AND NOT (auth.uid() = ANY(deleted_by));
+  RETURN true;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public.delete_message_for_me(uuid) TO authenticated;
+
+-- Delete a message for everyone: only the sender may do this. The row is
+-- removed entirely; returns the message's media_path (or null) so the
+-- client can also remove a voice file from Storage.
+CREATE OR REPLACE FUNCTION public.delete_message_for_everyone(p_message_id uuid)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_media text;
+  v_sender uuid;
+BEGIN
+  SELECT media_path, sender_id INTO v_media, v_sender
+  FROM public.messages WHERE id = p_message_id;
+  IF NOT FOUND THEN RAISE EXCEPTION 'message not found'; END IF;
+  IF v_sender <> auth.uid() THEN
+    RAISE EXCEPTION 'only the sender can delete this message for everyone';
+  END IF;
+  DELETE FROM public.messages WHERE id = p_message_id;
+  RETURN v_media;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public.delete_message_for_everyone(uuid) TO authenticated;
+
+-- Clear a whole chat for me: hide every message of the conversation
+-- from my own view.
+CREATE OR REPLACE FUNCTION public.clear_chat_for_me(p_conversation_id uuid)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_count integer;
+BEGIN
+  IF NOT public.is_conversation_participant(p_conversation_id) THEN
+    RAISE EXCEPTION 'not a participant of this conversation';
+  END IF;
+  UPDATE public.messages
+  SET deleted_by = array_append(deleted_by, auth.uid())
+  WHERE conversation_id = p_conversation_id
+    AND NOT (auth.uid() = ANY(deleted_by));
+  GET DIAGNOSTICS v_count = ROW_COUNT;
+  RETURN v_count;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public.clear_chat_for_me(uuid) TO authenticated;
+
+-- View-once voice: the RECIPIENT's full playback deletes the message
+-- from the database. Returns true only when the message is a view-once
+-- voice message, the caller is not the sender, it was not already
+-- consumed, and the caller is a participant. The client then removes
+-- the audio file from Storage as well.
+CREATE OR REPLACE FUNCTION public.consume_voice_message(p_message_id uuid)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_kind text;
+  v_once boolean;
+  v_sender uuid;
+  v_consumed timestamptz;
+  v_conv uuid;
+BEGIN
+  SELECT kind, view_once, sender_id, consumed_at, conversation_id
+  INTO v_kind, v_once, v_sender, v_consumed, v_conv
+  FROM public.messages WHERE id = p_message_id;
+  IF NOT FOUND THEN RETURN false; END IF;
+  IF v_kind <> 'voice' OR v_once IS NOT TRUE THEN RETURN false; END IF;
+  IF v_sender = auth.uid() THEN RETURN false; END IF;
+  IF v_consumed IS NOT NULL THEN RETURN false; END IF;
+  IF NOT public.is_conversation_participant(v_conv) THEN RETURN false; END IF;
+  DELETE FROM public.messages WHERE id = p_message_id;
+  RETURN true;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public.consume_voice_message(uuid) TO authenticated;
+
+-- ============================================================
+-- 10. STORAGE BUCKET 'voice-messages' — view-once voice messages
+-- Public bucket, 5 MB limit, audio only. Files live at
+-- <userId>/<uuid>.<ext>; each user can only write inside their own
+-- folder. Re-running is safe (ON CONFLICT ... DO UPDATE).
+-- ============================================================
+
+INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+VALUES ('voice-messages', 'voice-messages', true, 5242880,
+        ARRAY['audio/webm', 'audio/mp4', 'audio/mpeg', 'audio/ogg', 'audio/wav', 'audio/x-m4a'])
+ON CONFLICT (id) DO UPDATE SET
+  public = EXCLUDED.public,
+  file_size_limit = EXCLUDED.file_size_limit,
+  allowed_mime_types = EXCLUDED.allowed_mime_types;
+
+-- Anyone can read (play) a voice message.
+DROP POLICY IF EXISTS "voice_public_read" ON storage.objects;
+CREATE POLICY "voice_public_read" ON storage.objects
+  FOR SELECT TO public USING (bucket_id = 'voice-messages');
+-- Only the owner can upload into their own folder.
+DROP POLICY IF EXISTS "voice_insert_own" ON storage.objects;
+CREATE POLICY "voice_insert_own" ON storage.objects
+  FOR INSERT TO authenticated WITH CHECK (
+    bucket_id = 'voice-messages' AND (storage.foldername(name))[1] = auth.uid()::text
+  );
+-- Only the owner can replace their own voice file.
+DROP POLICY IF EXISTS "voice_update_own" ON storage.objects;
+CREATE POLICY "voice_update_own" ON storage.objects
+  FOR UPDATE TO authenticated
+  USING (bucket_id = 'voice-messages' AND (storage.foldername(name))[1] = auth.uid()::text)
+  WITH CHECK (bucket_id = 'voice-messages' AND (storage.foldername(name))[1] = auth.uid()::text);
+-- Only the owner can delete their own voice file (view-once consume
+-- and delete-for-everyone remove the file after deleting the row).
+DROP POLICY IF EXISTS "voice_delete_own" ON storage.objects;
+CREATE POLICY "voice_delete_own" ON storage.objects
+  FOR DELETE TO authenticated USING (
+    bucket_id = 'voice-messages' AND (storage.foldername(name))[1] = auth.uid()::text
+  );
+
+-- ---- realtime for reactions (messages are already in §5) ----
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables
+    WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'message_reactions'
+  ) THEN
+    EXECUTE 'ALTER PUBLICATION supabase_realtime ADD TABLE public.message_reactions';
+  END IF;
+END $$;

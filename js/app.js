@@ -149,6 +149,7 @@ async function boot() {
   $('audioCallBtn').innerHTML = icon('phone', 20);
   $('videoCallBtn').innerHTML = icon('video', 20);
   $('sendBtn').innerHTML = icon('send', 20);
+  $('micBtn').innerHTML = icon('mic', 20);
   document.querySelectorAll('[data-tab-icon]').forEach((el) => {
     const map = { chats: 'chat', calls: 'phone', people: 'users', profile: 'user' };
     el.innerHTML = icon(map[el.dataset.tabIcon] || 'chat', 22);

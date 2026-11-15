@@ -10,7 +10,8 @@ import { startCall } from './calls.js';
 import {
   initFriends, loadFriendships, loadRequests, friendshipStateOf,
   sendFriendRequest, respondFriendRequest, cancelFriendRequest,
-  openProfilePreview, canSeeDetails, onFriendshipsChange
+  openProfilePreview, canSeeDetails, onFriendshipsChange,
+  isBlockedByMe, isBlockedEither, unblockUser
 } from './friends.js';
 
 let me = null;
@@ -72,6 +73,10 @@ function renderPeople() {
 
 /* ---------- action buttons for one person, by friendship state ---------- */
 function personActions(p) {
+  if (isBlockedEither(p.id)) {
+    return '<span class="friend-badge" style="color:var(--danger)">Blocked</span>'
+      + (isBlockedByMe(p.id) ? '<button class="btn btn-ghost btn-sm" data-unblock="' + p.id + '" type="button">Unblock</button>' : '');
+  }
   const st = friendshipStateOf(p.id);
   if (st === 'friends') {
     return '<span class="friend-badge">' + icon('userCheck', 14) + ' Friends</span>'
@@ -161,6 +166,9 @@ function bindPersonButtons(scope) {
   });
   scope.querySelectorAll('[data-add]').forEach((btn) => {
     btn.addEventListener('click', async () => { await sendFriendRequest(btn.dataset.add); });
+  });
+  scope.querySelectorAll('[data-unblock]').forEach((btn) => {
+    btn.addEventListener('click', async () => { await unblockUser(btn.dataset.unblock); });
   });
   scope.querySelectorAll('[data-cancel]').forEach((btn) => {
     btn.addEventListener('click', async () => { await cancelFriendRequest(btn.dataset.cancel); });

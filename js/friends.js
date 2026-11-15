@@ -5,16 +5,25 @@
  * appear only for friends. A pending request (either direction) lets both
  * sides see the other person's full profile, so a request recipient can
  * inspect the sender before accepting.
+ *
+ * Blocks: while a block row exists between two users there is no contact
+ * either way (enforced in SQL: get_or_create_conversation + the messages
+ * INSERT policy). Reports are stored for later review; there is no admin
+ * review UI in the app.
  */
 import { sb, PC, toast, avatarHtml, icon } from './config.js';
 import { esc } from './ui.js';
-import { getOrCreateConversation } from './chats.js';
+import { getOrCreateConversation, getConversationIdWith } from './chats.js';
 import { startCall } from './calls.js';
 
 let me = null;
 let cache = new Map(); // otherUserId -> 'none' | 'pending_out' | 'pending_in' | 'friends' | 'declined'
 let listeners = [];
 let feedChannel = null;
+let blocksByMe = new Set(); // ids I blocked
+let blockedBy = new Set();  // ids who blocked me
+let previewProfile = null;
+let reportTarget = null;
 
 const $ = (id) => document.getElementById(id);
 
@@ -23,6 +32,10 @@ export function initFriends(user) {
   $('pvClose').innerHTML = icon('x', 18);
   $('pvClose').addEventListener('click', closeProfilePreview);
   $('profileModal').addEventListener('click', (e) => { if (e.target === $('profileModal')) closeProfilePreview(); });
+  $('reportCancel').addEventListener('click', closeReportModal);
+  $('reportModal').addEventListener('click', (e) => { if (e.target === $('reportModal')) closeReportModal(); });
+  $('reportSubmit').addEventListener('click', submitReport);
+  loadBlocks();
   // Live updates: when any friendship row involving anyone changes,
   // reload the cache and tell listeners (People re-renders itself).
   if (!feedChannel) {
@@ -66,6 +79,102 @@ export async function getFriendshipStatus(userId) {
     if (!r.error && r.data) { cache.set(userId, r.data); return r.data; }
   } catch (e) { /* fall through */ }
   return 'none';
+}
+
+/* ---------- blocks ---------- */
+export async function loadBlocks() {
+  if (!me) return;
+  try {
+    const r = await sb.from('blocks').select('blocker_id, blocked_id')
+      .or('blocker_id.eq.' + me.id + ',blocked_id.eq.' + me.id);
+    if (r.error) throw r.error;
+    blocksByMe = new Set();
+    blockedBy = new Set();
+    (r.data || []).forEach((row) => {
+      if (row.blocker_id === me.id) blocksByMe.add(row.blocked_id);
+      if (row.blocked_id === me.id) blockedBy.add(row.blocker_id);
+    });
+  } catch (e) { console.warn('load blocks failed', e); }
+}
+
+export function isBlockedByMe(userId) { return blocksByMe.has(userId); }
+export function isBlockedBy(userId) { return blockedBy.has(userId); }
+export function isBlockedEither(userId) { return blocksByMe.has(userId) || blockedBy.has(userId); }
+
+/* 'i_blocked' | 'blocked_me' | 'none' — direct query, no cache needed,
+ * so it is safe to call from calls.js before the cache is warm. */
+export async function checkBlockDirection(peerId) {
+  if (!me) return 'none';
+  try {
+    const r = await sb.from('blocks').select('blocker_id, blocked_id')
+      .or('and(blocker_id.eq.' + me.id + ',blocked_id.eq.' + peerId + '),and(blocker_id.eq.' + peerId + ',blocked_id.eq.' + me.id + ')');
+    if (r.error) throw r.error;
+    const rows = r.data || [];
+    if (rows.some((x) => x.blocker_id === me.id)) return 'i_blocked';
+    if (rows.length) return 'blocked_me';
+    return 'none';
+  } catch (e) { return 'none'; }
+}
+
+export async function blockUser(userId) {
+  try {
+    const r = await sb.from('blocks').insert({ blocker_id: me.id, blocked_id: userId });
+    if (r.error) throw r.error;
+  } catch (e) {
+    toast('Could not block user: ' + (e.message || 'error'), 'error');
+    return false;
+  }
+  blocksByMe.add(userId);
+  toast('User blocked.');
+  notify();
+  return true;
+}
+
+export async function unblockUser(userId) {
+  try {
+    const r = await sb.from('blocks').delete().eq('blocker_id', me.id).eq('blocked_id', userId);
+    if (r.error) throw r.error;
+  } catch (e) {
+    toast('Could not unblock user: ' + (e.message || 'error'), 'error');
+    return false;
+  }
+  blocksByMe.delete(userId);
+  toast('User unblocked.');
+  notify();
+  return true;
+}
+
+/* ---------- reports ---------- */
+function openReportModal(profile) {
+  reportTarget = profile;
+  $('reportName').textContent = profile.full_name || profile.username;
+  document.querySelectorAll('input[name="reportReason"]').forEach((x) => { x.checked = false; });
+  $('reportDetails').value = '';
+  $('reportModal').hidden = false;
+}
+
+function closeReportModal() {
+  $('reportModal').hidden = true;
+  reportTarget = null;
+}
+
+async function submitReport() {
+  if (!reportTarget) return;
+  const checked = document.querySelector('input[name="reportReason"]:checked');
+  const reason = checked ? checked.value : '';
+  if (!reason) { toast('Choose a reason for the report.', 'error'); return; }
+  const details = $('reportDetails').value.trim() || null;
+  try {
+    const r = await sb.from('reports').insert({
+      reporter_id: me.id, reported_id: reportTarget.id, reason, details
+    });
+    if (r.error) throw r.error;
+  } catch (e) {
+    toast('Could not send report: ' + (e.message || 'error'), 'error');
+    return;
+  }
+  closeReportModal();
+  toast('Thanks, your report was sent.', 'success');
 }
 
 /* ---------- actions ---------- */
@@ -159,16 +268,26 @@ export function canSeeDetails(profile, status) {
   return status === 'friends' || status === 'pending_in' || status === 'pending_out';
 }
 
-/* ---------- profile preview modal ---------- */
+/* ---------- profile preview modal ----------
+ * Order, top to bottom: avatar, name, @username, Online/Offline status,
+ * Message / Audio call / Video call buttons (friends only), friendship
+ * actions (Add Friend / Accept / Decline / Request sent), profile info
+ * (bio, Member since, friend status), then Clear chat / Block / Report. */
 export async function openProfilePreview(profile) {
   if (!profile || !me) return;
   if (profile.id === me.id) { location.hash = '#/profile'; return; }
+  previewProfile = profile;
   const status = await getFriendshipStatus(profile.id);
+  const blocked = isBlockedEither(profile.id);
   const canSee = canSeeDetails(profile, status);
   $('pvAvatar').innerHTML = avatarHtml(profile, 'lg');
   $('pvName').textContent = profile.full_name || profile.username;
-  $('pvUsername').textContent = '@' + profile.username
-    + (PC.state.online.has(profile.id) ? ' · Online' : '');
+  $('pvUsername').textContent = '@' + profile.username;
+  const online = PC.state.online.has(profile.id);
+  const stEl = $('pvStatus');
+  stEl.textContent = online ? 'Online' : 'Offline';
+  stEl.className = 'pv-status' + (online ? ' online' : '');
+  renderPreviewActions(profile, status, blocked);
   const details = $('pvDetails');
   const note = $('pvNote');
   if (canSee) {
@@ -186,16 +305,17 @@ export async function openProfilePreview(profile) {
     note.hidden = false;
     note.textContent = 'This profile is private — only friends can see the details.';
   }
-  renderPreviewActions(profile, status);
+  await renderPreviewExtra(profile);
   $('profileModal').hidden = false;
 }
 
 export function closeProfilePreview() {
   const m = $('profileModal');
   if (m) m.hidden = true;
+  previewProfile = null;
 }
 
-function renderPreviewActions(profile, status) {
+function renderPreviewActions(profile, status, blocked) {
   const box = $('pvActions');
   box.innerHTML = '';
   const mk = (label, cls, fn, disabled) => {
@@ -218,6 +338,17 @@ function renderPreviewActions(profile, status) {
     closeProfilePreview();
     startCall(convId, profile, kind);
   };
+  if (blocked) {
+    const s = document.createElement('span');
+    s.className = 'friend-badge';
+    s.style.cssText = 'display:inline-flex;align-items:center;color:var(--danger);font-weight:600;padding:10px 4px';
+    s.textContent = 'Blocked';
+    box.append(s);
+    if (isBlockedByMe(profile.id)) {
+      mk('Unblock', 'btn-ghost', async () => { if (await unblockUser(profile.id)) openProfilePreview(profile); });
+    }
+    return;
+  }
   if (status === 'friends') {
     mk('Message', 'btn-primary', openChat);
     mk('Audio call', 'btn-ghost', () => call('audio'));
@@ -231,4 +362,36 @@ function renderPreviewActions(profile, status) {
   } else {
     mk('Add Friend', 'btn-primary', async () => { if (await sendFriendRequest(profile.id)) openProfilePreview(profile); });
   }
+}
+
+async function renderPreviewExtra(profile) {
+  const box = $('pvExtra');
+  box.innerHTML = '';
+  const mkRow = (label, danger, fn) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'pv-row' + (danger ? ' danger' : '');
+    b.textContent = label;
+    b.addEventListener('click', fn);
+    box.append(b);
+  };
+  const convId = await getConversationIdWith(profile.id);
+  if (convId) {
+    mkRow('Clear chat', false, async () => {
+      if (!confirm('Clear all messages in this chat for you?')) return;
+      let r;
+      try { r = await sb.rpc('clear_chat_for_me', { p_conversation_id: convId }); }
+      catch (e) { toast('Could not clear chat. Check your connection.', 'error'); return; }
+      if (r.error) { toast('Could not clear chat: ' + r.error.message, 'error'); return; }
+      toast('Chat cleared.', 'success');
+    });
+  }
+  mkRow(isBlockedByMe(profile.id) ? 'Unblock' : 'Block', true, async () => {
+    if (isBlockedByMe(profile.id)) {
+      if (await unblockUser(profile.id)) openProfilePreview(profile);
+    } else {
+      if (await blockUser(profile.id)) openProfilePreview(profile);
+    }
+  });
+  mkRow('Report', true, () => openReportModal(profile));
 }

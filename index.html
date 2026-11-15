@@ -137,7 +137,23 @@
       </div>
       <div class="chat-body" id="msgList"></div>
       <div class="typing-ind" id="typingInd"></div>
+      <div class="reply-bar" id="replyBar" hidden>
+        <span class="reply-bar-body"><b id="replyBarName"></b><span id="replyBarText"></span></span>
+        <button class="icon-btn" id="replyBarCancel" type="button" aria-label="Cancel reply"></button>
+      </div>
+      <div class="voice-rec" id="voiceRecBar" hidden>
+        <span class="rec-dot"></span><span id="voiceRecTimer">00:00</span><span class="rec-hint">Recording voice message…</span>
+        <button class="btn btn-danger btn-sm" id="voiceRecStop" type="button">Stop</button>
+      </div>
+      <div class="voice-preview" id="voicePreviewBar" hidden>
+        <button class="icon-btn" id="voicePrevPlay" type="button" aria-label="Play voice preview"></button>
+        <span id="voicePrevDur">00:00</span>
+        <span class="voice-prog"><span class="voice-prog-fill" id="voicePrevProg"></span></span>
+        <button class="btn btn-primary btn-sm" id="voicePrevSend" type="button">Send</button>
+        <button class="btn btn-ghost btn-sm" id="voicePrevCancel" type="button">Cancel</button>
+      </div>
       <form class="composer" id="composerForm">
+        <button class="icon-btn" id="micBtn" type="button" aria-label="Record voice message"></button>
         <input class="input" id="msgInput" type="text" placeholder="Type a message…" autocomplete="off" maxlength="2000">
         <button class="send-btn" id="sendBtn" type="submit" aria-label="Send message"></button>
       </form>
@@ -306,11 +322,34 @@
     <span id="pvAvatar"></span>
     <h3 id="pvName">…</h3>
     <p id="pvUsername"></p>
+    <p class="pv-status" id="pvStatus"></p>
+    <div class="actions" id="pvActions"></div>
     <div id="pvDetails"></div>
     <p class="pv-note" id="pvNote" hidden></p>
-    <div class="actions" id="pvActions"></div>
+    <div id="pvExtra"></div>
   </div>
 </div>
+
+<div class="modal-backdrop" id="reportModal" hidden>
+  <div class="modal" role="dialog" aria-label="Report user">
+    <h3>Report <span id="reportName"></span></h3>
+    <p>Choose a reason for your report.</p>
+    <div class="report-reasons">
+      <label><input type="radio" name="reportReason" value="Spam"> Spam</label>
+      <label><input type="radio" name="reportReason" value="Harassment"> Harassment</label>
+      <label><input type="radio" name="reportReason" value="Inappropriate content"> Inappropriate content</label>
+      <label><input type="radio" name="reportReason" value="Fake account"> Fake account</label>
+      <label><input type="radio" name="reportReason" value="Other"> Other</label>
+    </div>
+    <div class="field"><textarea class="input" id="reportDetails" rows="3" maxlength="500" placeholder="Details (optional)"></textarea></div>
+    <div class="actions">
+      <button class="btn btn-ghost" id="reportCancel" type="button">Cancel</button>
+      <button class="btn btn-danger" id="reportSubmit" type="button">Send report</button>
+    </div>
+  </div>
+</div>
+
+<div class="msg-menu" id="msgMenu" hidden></div>
 
 <div id="toasts" aria-live="polite"></div>
 <script type="module" src="js/app.js"></script>

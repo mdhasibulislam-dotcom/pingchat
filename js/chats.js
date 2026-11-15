@@ -1,6 +1,7 @@
-/* PingChat v2 — chats: conversation list, messages, typing, read ticks. */
+/* PingChat v2 — chats: conversation list, messages, typing, read ticks,
+ * reactions, replies, message delete, view-once voice messages. */
 import { sb, PC, toast, avatarHtml, timeAgo, fmtTime, fmtDate, icon, onPresenceChange } from './config.js';
-import { esc, debounce } from './ui.js';
+import { esc, debounce, formatDuration } from './ui.js';
 import { startCall } from './calls.js';
 import { openProfilePreview } from './friends.js';
 
@@ -12,9 +13,21 @@ let otherLastReadAt = null;
 let roomChannel = null;
 let typingChannel = null;
 let feedChannel = null;
+let reactionsChannel = null;
 let renderedMsgIds = new Set();
 let typingTimeout = null;
 let typingVisibleFor = null;
+
+let messagesById = new Map(); // rendered message id -> row
+let replyTargets = new Map(); // reply_to_id -> row | null (null = deleted / not visible)
+let reactionsByMsg = new Map(); // message id -> [{user_id, emoji}]
+let replyTo = null;           // message being replied to
+let consumedVoiceIds = new Set(); // view-once voice ids already consumed by me
+let audioEls = new Map();     // voice message id -> { audio }
+let playingAudio = null;      // { msgId, audio }
+
+const REACTION_EMOJIS = ['❤️', '😂', '😮', '😢', '😡', '👍'];
+const MAX_VOICE_SECONDS = 120;
 
 const $ = (id) => document.getElementById(id);
 
@@ -26,15 +39,58 @@ export function initChats(user) {
   $('audioCallBtn').addEventListener('click', () => { if (activeId && activeOther) startCall(activeId, activeOther, 'audio'); });
   $('videoCallBtn').addEventListener('click', () => { if (activeId && activeOther) startCall(activeId, activeOther, 'video'); });
   $('chatWho').addEventListener('click', () => { if (activeOther) openProfilePreview(activeOther); });
+  $('replyBarCancel').innerHTML = icon('x', 16);
+  $('replyBarCancel').addEventListener('click', clearReply);
+  $('micBtn').addEventListener('click', onMicClick);
+  $('voiceRecStop').addEventListener('click', stopVoiceRecording);
+  $('voicePrevPlay').addEventListener('click', togglePreviewPlayback);
+  $('voicePrevSend').addEventListener('click', sendVoicePreview);
+  $('voicePrevCancel').addEventListener('click', cancelVoicePreview);
   onPresenceChange(() => { renderConversationLists(); renderChatHeader(); });
 
-  // Global feed: any new message refreshes the list (and the open chat).
+  // Close the floating message menu on outside click / Escape.
+  document.addEventListener('click', (e) => {
+    const menu = $('msgMenu');
+    if (!menu || menu.hidden) return;
+    if (menu.contains(e.target)) return;
+    if (e.target.closest && e.target.closest('.msg-menu-btn')) return;
+    closeMsgMenu();
+  });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeMsgMenu(); });
+
+  // Global feed: new messages, deletions and delete-for-me updates.
   if (!feedChannel) {
     feedChannel = sb.channel('messages-feed')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, (payload) => {
         const m = payload.new;
         if (m.conversation_id === activeId) appendMessage(m, true);
         refreshConversations();
+      })
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'messages' }, (payload) => {
+        const m = payload.new;
+        if (m && m.conversation_id === activeId && m.deleted_by && m.deleted_by.includes(me.id)) {
+          removeMessageElement(m.id);
+        }
+        refreshConversations();
+      })
+      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'messages' }, (payload) => {
+        const id = payload.old && payload.old.id;
+        if (id) {
+          markQuotesDeleted(id);
+          removeMessageElement(id);
+        }
+        refreshConversations();
+      })
+      .subscribe();
+  }
+  // Live reactions.
+  if (!reactionsChannel) {
+    reactionsChannel = sb.channel('reactions-feed')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'message_reactions' }, (payload) => {
+        applyReactionInsert(payload.new);
+      })
+      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'message_reactions' }, (payload) => {
+        applyReactionDelete(payload.old);
       })
       .subscribe();
   }
@@ -56,7 +112,7 @@ export async function refreshConversations() {
 
   const [allPartsR, msgsR, convsR] = await Promise.all([
     sb.from('conversation_participants').select('conversation_id, user_id, last_read_at').in('conversation_id', convIds),
-    sb.from('messages').select('id, conversation_id, sender_id, body, created_at').in('conversation_id', convIds).order('created_at', { ascending: false }).limit(500),
+    sb.from('messages').select('id, conversation_id, sender_id, body, created_at, kind').in('conversation_id', convIds).order('created_at', { ascending: false }).limit(500),
     sb.from('conversations').select('id, created_at, last_message_at').in('id', convIds)
   ]);
   if (allPartsR.error || msgsR.error || convsR.error) { console.warn('load conversations detail failed'); return; }
@@ -91,7 +147,7 @@ export async function refreshConversations() {
 function convRowHtml(c) {
   const name = esc(c.other ? (c.other.full_name || c.other.username) : 'PingChat user');
   const last = c.lastMessage
-    ? esc((c.lastMessage.sender_id === me.id ? 'You: ' : '') + c.lastMessage.body)
+    ? esc((c.lastMessage.sender_id === me.id ? 'You: ' : '') + (c.lastMessage.kind === 'voice' ? 'Voice message' : c.lastMessage.body))
     : '<span style="color:var(--muted)">No messages yet — say hello.</span>';
   const badge = c.unread ? '<span class="badge">' + c.unread + '</span>' : '';
   return '<button class="conv-row' + (c.id === activeId ? ' active' : '') + '" data-conv="' + c.id + '" type="button">'
@@ -125,12 +181,37 @@ export function renderConversationLists() {
   });
 }
 
+/* ---------- find a conversation with a peer (for Clear chat etc.) ---------- */
+export async function getConversationIdWith(peerId) {
+  const c = conversations.find((x) => x.other && x.other.id === peerId);
+  if (c) return c.id;
+  try {
+    const mine = await sb.from('conversation_participants').select('conversation_id').eq('user_id', me.id);
+    const ids = (mine.data || []).map((p) => p.conversation_id);
+    if (!ids.length) return null;
+    const others = await sb.from('conversation_participants').select('conversation_id')
+      .in('conversation_id', ids).eq('user_id', peerId);
+    return (others.data && others.data[0]) ? others.data[0].conversation_id : null;
+  } catch (e) { return null; }
+}
+
 /* ---------- open chat ---------- */
 export async function openConversation(id) {
   if (!me) return;
   activeId = id;
   PC.state.activeConversationId = id;
   renderedMsgIds = new Set();
+  messagesById = new Map();
+  replyTargets = new Map();
+  reactionsByMsg = new Map();
+  consumedVoiceIds = new Set();
+  stopPlayingAudio();
+  audioEls.forEach((e) => { try { e.audio.pause(); } catch (err) {} });
+  audioEls.clear();
+  stopVoiceRecording();
+  cancelVoicePreview();
+  clearReply();
+  closeMsgMenu();
   const conv = conversations.find((c) => c.id === id);
   activeOther = conv ? conv.other : null;
 
@@ -151,7 +232,7 @@ export async function openConversation(id) {
   $('msgList').innerHTML = '<div class="empty">Loading messages…</div>';
   let msgs = [];
   try {
-    const r = await sb.from('messages').select('id, conversation_id, sender_id, body, created_at')
+    const r = await sb.from('messages').select('id, conversation_id, sender_id, body, created_at, reply_to_id, kind, media_url, media_path, view_once')
       .eq('conversation_id', id).order('created_at', { ascending: true }).limit(200);
     if (r.error) throw r.error;
     msgs = r.data || [];
@@ -159,8 +240,35 @@ export async function openConversation(id) {
     $('msgList').innerHTML = '<div class="empty">Could not load messages. Check your connection and try again.</div>';
     return;
   }
+  // Resolve reply targets (for quotes) before rendering.
+  const replyIds = [...new Set(msgs.map((m) => m.reply_to_id).filter(Boolean))];
+  const missing = replyIds.filter((x) => !replyTargets.has(x));
+  if (missing.length) {
+    try {
+      const tr = await sb.from('messages').select('id, sender_id, body, kind').in('id', missing);
+      if (!tr.error) {
+        (tr.data || []).forEach((t) => replyTargets.set(t.id, t));
+        missing.forEach((x) => { if (!replyTargets.has(x)) replyTargets.set(x, null); });
+      }
+    } catch (e) { /* quotes fill in later via ensureReplyTarget */ }
+  }
   $('msgList').innerHTML = '';
   msgs.forEach((m) => appendMessage(m, false));
+  // Reactions for the loaded messages.
+  const ids = msgs.map((m) => m.id);
+  if (ids.length) {
+    try {
+      const rr = await sb.from('message_reactions').select('message_id, user_id, emoji').in('message_id', ids);
+      if (!rr.error) {
+        (rr.data || []).forEach((row) => {
+          const list = reactionsByMsg.get(row.message_id) || [];
+          list.push(row);
+          reactionsByMsg.set(row.message_id, list);
+        });
+        ids.forEach((x) => renderReactions(x));
+      }
+    } catch (e) { /* reactions are best-effort */ }
+  }
   scrollToBottom();
   subscribeRoom(id);
   markRead();
@@ -172,6 +280,11 @@ export function closeChat() {
   activeOther = null;
   PC.state.activeConversationId = null;
   unsubscribeRoom();
+  stopVoiceRecording();
+  cancelVoicePreview();
+  stopPlayingAudio();
+  clearReply();
+  closeMsgMenu();
   renderConversationLists();
 }
 
@@ -217,9 +330,78 @@ function unsubscribeRoom() {
 /* ---------- messages ---------- */
 function dayKey(iso) { return new Date(iso).toDateString(); }
 
+function senderNameOf(userId) {
+  if (userId === me.id) return 'You';
+  return activeOther ? (activeOther.full_name || activeOther.username) : 'Them';
+}
+
+function quoteHtml(m) {
+  if (!m.reply_to_id) return '';
+  const t = messagesById.get(m.reply_to_id);
+  if (t) return quoteElHtml(m.reply_to_id, t.sender_id, t.kind === 'voice' ? 'Voice message' : (t.body || ''));
+  const known = replyTargets.get(m.reply_to_id);
+  if (known === null) return '<div class="quote" data-target="' + m.reply_to_id + '"><b></b><span class="quote-text">Message deleted</span></div>';
+  if (known) return quoteElHtml(m.reply_to_id, known.sender_id, known.kind === 'voice' ? 'Voice message' : (known.body || ''));
+  ensureReplyTarget(m.reply_to_id);
+  return '<div class="quote" data-target="' + m.reply_to_id + '"><b>…</b><span class="quote-text">Loading…</span></div>';
+}
+
+function quoteElHtml(targetId, senderId, text) {
+  return '<div class="quote" data-target="' + targetId + '"><b>' + esc(senderNameOf(senderId)) + '</b><span class="quote-text">' + esc(text) + '</span></div>';
+}
+
+async function ensureReplyTarget(id) {
+  if (replyTargets.has(id)) return;
+  try {
+    const r = await sb.from('messages').select('id, sender_id, body, kind').eq('id', id).maybeSingle();
+    replyTargets.set(id, r.data || null);
+  } catch (e) { return; }
+  const t = replyTargets.get(id);
+  document.querySelectorAll('#msgList .quote[data-target="' + id + '"]').forEach((el) => {
+    if (t === null) {
+      const s = el.querySelector('.quote-text');
+      if (s) s.textContent = 'Message deleted';
+      const b = el.querySelector('b');
+      if (b) b.textContent = '';
+    } else {
+      el.outerHTML = quoteElHtml(id, t.sender_id, t.kind === 'voice' ? 'Voice message' : (t.body || ''));
+    }
+  });
+  // Re-bind quote clicks after an outerHTML swap.
+  document.querySelectorAll('#msgList .quote[data-target="' + id + '"]').forEach((el) => {
+    el.addEventListener('click', () => jumpToMessage(id));
+  });
+}
+
+function jumpToMessage(id) {
+  const el = document.querySelector('#msgList .msg[data-id="' + id + '"]');
+  if (!el) { toast('Original message is no longer visible.', 'error'); return; }
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  el.classList.add('flash');
+  setTimeout(() => el.classList.remove('flash'), 1300);
+}
+
+function markQuotesDeleted(id) {
+  replyTargets.set(id, null);
+  document.querySelectorAll('#msgList .quote[data-target="' + id + '"]').forEach((q) => {
+    const t = q.querySelector('.quote-text');
+    if (t) t.textContent = 'Message deleted';
+  });
+}
+
+function voiceBubbleHtml(m) {
+  return '<span class="bubble voice-bubble"><span class="voice-player">'
+    + '<button class="voice-play" type="button" aria-label="Play voice message">' + icon('play', 16) + '</button>'
+    + '<span class="voice-prog"><span class="voice-prog-fill"></span></span>'
+    + '<span class="voice-dur">0:00</span></span>'
+    + (m.view_once ? '<span class="voice-once">View once</span>' : '')
+    + '</span>';
+}
+
 function appendMessage(m, scroll) {
   if (renderedMsgIds.has(m.id)) return;
   renderedMsgIds.add(m.id);
+  messagesById.set(m.id, m);
   const list = $('msgList');
   const mine = m.sender_id === me.id;
   const prev = list.querySelector('.msg:last-of-type');
@@ -242,11 +424,41 @@ function appendMessage(m, scroll) {
   const ticks = mine
     ? '<span class="ticks' + (isRead(m) ? ' read' : '') + '">' + (isRead(m) ? '✓✓' : '✓') + '</span>'
     : '';
-  div.innerHTML = '<span class="bubble">' + esc(m.body) + '</span>'
+  div.innerHTML = '<div class="msg-row"><div class="bubble-wrap">'
+    + quoteHtml(m)
+    + (m.kind === 'voice' ? voiceBubbleHtml(m) : '<span class="bubble">' + esc(m.body || '') + '</span>')
+    + '<div class="reactions"></div>'
+    + '</div><button class="msg-menu-btn" type="button" aria-label="Message options">' + icon('more', 16) + '</button></div>'
     + '<span class="meta">' + fmtTime(m.created_at) + ticks + '</span>';
   list.append(div);
+  wireMessage(div, m);
+  renderReactions(m.id);
   if (scroll) scrollToBottom();
   if (!mine && m.conversation_id === activeId) markRead();
+}
+
+function wireMessage(div, m) {
+  const menuBtn = div.querySelector('.msg-menu-btn');
+  if (menuBtn) menuBtn.addEventListener('click', (e) => { e.stopPropagation(); openMsgMenu(m.id, menuBtn); });
+  const quote = div.querySelector('.quote');
+  if (quote) quote.addEventListener('click', () => jumpToMessage(m.reply_to_id));
+  const playBtn = div.querySelector('.voice-play');
+  if (playBtn) playBtn.addEventListener('click', () => toggleVoicePlayback(m));
+  const prog = div.querySelector('.voice-prog');
+  if (prog) prog.addEventListener('click', (e) => {
+    const entry = audioEls.get(m.id);
+    if (!entry || !entry.audio.duration) return;
+    const r = prog.getBoundingClientRect();
+    entry.audio.currentTime = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * entry.audio.duration;
+  });
+}
+
+function removeMessageElement(msgId) {
+  renderedMsgIds.delete(msgId);
+  messagesById.delete(msgId);
+  const el = document.querySelector('#msgList .msg[data-id="' + msgId + '"]');
+  if (el) el.remove();
+  if (replyTo && replyTo.id === msgId) clearReply();
 }
 
 function isRead(m) {
@@ -273,11 +485,14 @@ async function onSend(e) {
   if (!body || !activeId) return;
   input.value = '';
   stopTypingBroadcast();
+  const payload = { conversation_id: activeId, sender_id: me.id, body };
+  if (replyTo) payload.reply_to_id = replyTo.id;
   let r;
   try {
-    r = await sb.from('messages').insert({ conversation_id: activeId, sender_id: me.id, body }).select().single();
+    r = await sb.from('messages').insert(payload).select().single();
   } catch (err) { toast('Could not send message. Check your connection.', 'error'); return; }
   if (r.error) { toast('Could not send message: ' + r.error.message, 'error'); return; }
+  clearReply();
   appendMessage(r.data, true);
   markRead();
   refreshConversations();
@@ -292,6 +507,386 @@ async function markRead() {
   } catch (e) { /* non-fatal */ }
   const c = conversations.find((x) => x.id === activeId);
   if (c) { c.unread = 0; renderConversationLists(); }
+}
+
+/* ---------- message menu: react / reply / delete ---------- */
+function openMsgMenu(msgId, anchor) {
+  const m = messagesById.get(msgId);
+  if (!m) return;
+  const menu = $('msgMenu');
+  const mine = m.sender_id === me.id;
+  menu.innerHTML = '';
+  const mkItem = (label, fn, danger) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'msg-menu-item' + (danger ? ' danger' : '');
+    b.textContent = label;
+    b.addEventListener('click', fn);
+    menu.append(b);
+  };
+  mkItem('React', () => showEmojiPicker(msgId));
+  mkItem('Reply', () => { closeMsgMenu(); startReply(msgId); });
+  if (mine) {
+    mkItem('Delete for me', () => { closeMsgMenu(); deleteForMe(msgId); });
+    mkItem('Delete for everyone', () => { closeMsgMenu(); deleteForEveryone(msgId); }, true);
+  }
+  positionMenu(menu, anchor);
+}
+
+function showEmojiPicker(msgId) {
+  const menu = $('msgMenu');
+  menu.innerHTML = '';
+  const row = document.createElement('div');
+  row.className = 'emoji-row';
+  REACTION_EMOJIS.forEach((em) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = em;
+    b.setAttribute('aria-label', 'React ' + em);
+    b.addEventListener('click', () => { closeMsgMenu(); toggleReaction(msgId, em); });
+    row.append(b);
+  });
+  menu.append(row);
+}
+
+function positionMenu(menu, anchor) {
+  menu.hidden = false;
+  const r = anchor.getBoundingClientRect();
+  const mw = menu.offsetWidth;
+  const mh = menu.offsetHeight;
+  let left = Math.min(Math.max(8, r.left), window.innerWidth - mw - 8);
+  let top = r.bottom + 6;
+  if (top + mh > window.innerHeight - 8) top = Math.max(8, r.top - mh - 6);
+  menu.style.left = left + 'px';
+  menu.style.top = top + 'px';
+}
+
+function closeMsgMenu() {
+  const menu = $('msgMenu');
+  if (menu) menu.hidden = true;
+}
+
+/* ---------- reactions ---------- */
+function renderReactions(msgId) {
+  const el = document.querySelector('#msgList .msg[data-id="' + msgId + '"] .reactions');
+  if (!el) return;
+  const list = reactionsByMsg.get(msgId) || [];
+  const groups = new Map();
+  list.forEach((r) => {
+    const g = groups.get(r.emoji) || { emoji: r.emoji, count: 0, mine: false };
+    g.count += 1;
+    if (r.user_id === me.id) g.mine = true;
+    groups.set(r.emoji, g);
+  });
+  el.innerHTML = '';
+  [...groups.values()].forEach((g) => {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'react-chip' + (g.mine ? ' mine' : '');
+    chip.textContent = g.emoji + (g.count > 1 ? ' ' + g.count : '');
+    chip.addEventListener('click', () => toggleReaction(msgId, g.emoji));
+    el.append(chip);
+  });
+}
+
+function applyReactionInsert(row) {
+  if (!row || !row.message_id) return;
+  const list = reactionsByMsg.get(row.message_id) || [];
+  const i = list.findIndex((r) => r.user_id === row.user_id);
+  if (i >= 0) list[i] = row; else list.push(row);
+  reactionsByMsg.set(row.message_id, list);
+  renderReactions(row.message_id);
+}
+
+function applyReactionDelete(oldRow) {
+  if (!oldRow || !oldRow.message_id) return;
+  const list = reactionsByMsg.get(oldRow.message_id) || [];
+  reactionsByMsg.set(oldRow.message_id, list.filter((r) => r.user_id !== oldRow.user_id));
+  renderReactions(oldRow.message_id);
+}
+
+async function toggleReaction(msgId, emoji) {
+  const list = reactionsByMsg.get(msgId) || [];
+  const mine = list.find((r) => r.user_id === me.id);
+  try {
+    if (mine && mine.emoji === emoji) {
+      const r = await sb.from('message_reactions').delete()
+        .eq('message_id', msgId).eq('user_id', me.id).eq('emoji', emoji);
+      if (r.error) throw r.error;
+      applyReactionDelete({ message_id: msgId, user_id: me.id });
+    } else {
+      const r = await sb.from('message_reactions')
+        .upsert({ message_id: msgId, user_id: me.id, emoji }, { onConflict: 'message_id,user_id' })
+        .select().single();
+      if (r.error) throw r.error;
+      applyReactionInsert(r.data);
+    }
+  } catch (e) {
+    toast('Could not react: ' + (e.message || 'error'), 'error');
+  }
+}
+
+/* ---------- reply ---------- */
+function startReply(msgId) {
+  const m = messagesById.get(msgId);
+  if (!m) return;
+  replyTo = m;
+  $('replyBarName').textContent = 'Replying to ' + senderNameOf(m.sender_id);
+  $('replyBarText').textContent = m.kind === 'voice' ? 'Voice message' : (m.body || '');
+  $('replyBar').hidden = false;
+  $('msgInput').focus();
+}
+
+function clearReply() {
+  replyTo = null;
+  const bar = $('replyBar');
+  if (bar) bar.hidden = true;
+}
+
+/* ---------- delete ---------- */
+async function deleteForMe(msgId) {
+  let r;
+  try { r = await sb.rpc('delete_message_for_me', { p_message_id: msgId }); }
+  catch (e) { toast('Could not delete message. Check your connection.', 'error'); return; }
+  if (r.error) { toast('Could not delete message: ' + r.error.message, 'error'); return; }
+  removeMessageElement(msgId);
+  refreshConversations();
+}
+
+async function deleteForEveryone(msgId) {
+  let r;
+  try { r = await sb.rpc('delete_message_for_everyone', { p_message_id: msgId }); }
+  catch (e) { toast('Could not delete message. Check your connection.', 'error'); return; }
+  if (r.error) { toast('Could not delete message: ' + r.error.message, 'error'); return; }
+  const mediaPath = r.data;
+  removeMessageElement(msgId);
+  if (mediaPath) {
+    try { await sb.storage.from('voice-messages').remove([mediaPath]); } catch (e) { /* best-effort */ }
+  }
+  refreshConversations();
+}
+
+/* ---------- voice messages (view-once) ---------- */
+let recState = null;    // { stream, recorder, chunks, mime, startAt, timerId, stopId }
+let previewState = null; // { blob, url, mime, duration, audio, playing }
+
+function onMicClick() {
+  if (recState || previewState) return;
+  startVoiceRecording();
+}
+
+async function startVoiceRecording() {
+  if (!window.MediaRecorder || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    toast('Voice recording is not supported in this browser.', 'error');
+    return;
+  }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    toast('Microphone unavailable: ' + (e && (e.message || e.name) || 'permission denied'), 'error');
+    return;
+  }
+  const mime = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg'].find((t) => {
+    try { return MediaRecorder.isTypeSupported(t); } catch (err) { return false; }
+  }) || '';
+  let recorder;
+  try {
+    recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+  } catch (e) {
+    stream.getTracks().forEach((t) => t.stop());
+    toast('Voice recording is not supported in this browser.', 'error');
+    return;
+  }
+  const chunks = [];
+  recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+  recorder.onstop = () => {
+    const convId = recState.convId;
+    const startAt = recState.startAt;
+    const blob = new Blob(chunks, { type: mime || 'audio/webm' });
+    const duration = (Date.now() - startAt) / 1000;
+    stream.getTracks().forEach((t) => t.stop());
+    recState = null;
+    $('voiceRecBar').hidden = true;
+    // If the user left the chat while recording, discard the clip
+    // instead of showing a preview that could be sent to the wrong chat.
+    if (convId !== activeId) return;
+    showVoicePreview(blob, mime, duration);
+  };
+  recState = { stream, recorder, chunks, mime, startAt: Date.now(), timerId: null, stopId: null, convId: activeId };
+  recorder.start(250);
+  $('voiceRecBar').hidden = false;
+  $('voiceRecTimer').textContent = '00:00';
+  recState.timerId = setInterval(() => {
+    if (!recState) return;
+    $('voiceRecTimer').textContent = formatDuration((Date.now() - recState.startAt) / 1000);
+  }, 500);
+  recState.stopId = setTimeout(() => { if (recState) stopVoiceRecording(); }, MAX_VOICE_SECONDS * 1000);
+}
+
+function stopVoiceRecording() {
+  if (!recState) return;
+  clearInterval(recState.timerId);
+  clearTimeout(recState.stopId);
+  try { recState.recorder.stop(); } catch (e) {
+    recState.stream.getTracks().forEach((t) => t.stop());
+    recState = null;
+    $('voiceRecBar').hidden = true;
+  }
+}
+
+function showVoicePreview(blob, mime, duration) {
+  const url = URL.createObjectURL(blob);
+  const audio = new Audio(url);
+  previewState = { blob, url, mime, duration, audio, playing: false };
+  $('voicePrevPlay').innerHTML = icon('play', 16);
+  $('voicePrevDur').textContent = formatDuration(duration);
+  $('voicePrevProg').style.width = '0%';
+  $('voicePreviewBar').hidden = false;
+  audio.addEventListener('timeupdate', () => {
+    if (previewState && audio.duration) {
+      $('voicePrevProg').style.width = Math.min(100, (audio.currentTime / audio.duration) * 100) + '%';
+    }
+  });
+  audio.addEventListener('ended', () => {
+    if (!previewState) return;
+    previewState.playing = false;
+    $('voicePrevPlay').innerHTML = icon('play', 16);
+  });
+}
+
+function togglePreviewPlayback() {
+  if (!previewState) return;
+  if (previewState.playing) {
+    previewState.audio.pause();
+    previewState.playing = false;
+    $('voicePrevPlay').innerHTML = icon('play', 16);
+    return;
+  }
+  previewState.audio.play().catch(() => toast('Could not play preview.', 'error'));
+  previewState.playing = true;
+  $('voicePrevPlay').innerHTML = icon('pause', 16);
+}
+
+function cancelVoicePreview() {
+  if (!previewState) return;
+  try { previewState.audio.pause(); } catch (e) {}
+  URL.revokeObjectURL(previewState.url);
+  previewState = null;
+  $('voicePreviewBar').hidden = true;
+}
+
+function extForMime(mime) {
+  if (/mp4/i.test(mime || '')) return '.m4a';
+  if (/ogg/i.test(mime || '')) return '.ogg';
+  return '.webm';
+}
+
+async function sendVoicePreview() {
+  if (!previewState || !activeId) return;
+  const btn = $('voicePrevSend');
+  btn.disabled = true;
+  const path = me.id + '/' + (crypto.randomUUID ? crypto.randomUUID() : 'v-' + Date.now()) + extForMime(previewState.mime);
+  try {
+    const up = await sb.storage.from('voice-messages').upload(path, previewState.blob, {
+      contentType: previewState.mime || 'audio/webm', upsert: false
+    });
+    if (up.error) throw up.error;
+    const { data } = sb.storage.from('voice-messages').getPublicUrl(path);
+    const r = await sb.from('messages').insert({
+      conversation_id: activeId, sender_id: me.id, body: '',
+      kind: 'voice', media_url: data.publicUrl, media_path: path, view_once: true
+    }).select().single();
+    if (r.error) throw r.error;
+    cancelVoicePreview();
+    appendMessage(r.data, true);
+    markRead();
+    refreshConversations();
+  } catch (e) {
+    toast('Could not send voice message: ' + (e.message || 'error'), 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/* ---------- voice playback (view-once consume) ---------- */
+function voiceEls(msgId) {
+  const el = document.querySelector('#msgList .msg[data-id="' + msgId + '"]');
+  if (!el) return null;
+  return {
+    root: el,
+    playBtn: el.querySelector('.voice-play'),
+    fill: el.querySelector('.voice-prog-fill'),
+    dur: el.querySelector('.voice-dur')
+  };
+}
+
+function setVoiceIcon(msgId, playing) {
+  const els = voiceEls(msgId);
+  if (els && els.playBtn) els.playBtn.innerHTML = icon(playing ? 'pause' : 'play', 16);
+}
+
+function stopPlayingAudio() {
+  if (playingAudio) {
+    try { playingAudio.audio.pause(); } catch (e) {}
+    playingAudio = null;
+  }
+}
+
+function toggleVoicePlayback(m) {
+  if (!m.media_url) return;
+  if (playingAudio && playingAudio.msgId === m.id) {
+    playingAudio.audio.pause();
+    return;
+  }
+  stopPlayingAudio();
+  let entry = audioEls.get(m.id);
+  if (!entry) {
+    const audio = new Audio(m.media_url);
+    audio.preload = 'metadata';
+    entry = { audio };
+    audioEls.set(m.id, entry);
+    audio.addEventListener('loadedmetadata', () => {
+      const els = voiceEls(m.id);
+      if (els && els.dur && isFinite(audio.duration)) els.dur.textContent = formatDuration(audio.duration);
+    });
+    audio.addEventListener('timeupdate', () => {
+      const els = voiceEls(m.id);
+      if (els && els.fill && audio.duration) {
+        els.fill.style.width = Math.min(100, (audio.currentTime / audio.duration) * 100) + '%';
+      }
+    });
+    audio.addEventListener('pause', () => {
+      setVoiceIcon(m.id, false);
+      if (playingAudio && playingAudio.msgId === m.id) playingAudio = null;
+    });
+    audio.addEventListener('ended', () => { onVoiceEnded(m); });
+  }
+  entry.audio.play().catch(() => toast('Could not play voice message.', 'error'));
+  playingAudio = { msgId: m.id, audio: entry.audio };
+  setVoiceIcon(m.id, true);
+}
+
+async function onVoiceEnded(m) {
+  setVoiceIcon(m.id, false);
+  const els = voiceEls(m.id);
+  if (els && els.fill) els.fill.style.width = '0%';
+  if (playingAudio && playingAudio.msgId === m.id) playingAudio = null;
+  // View-once: only the RECIPIENT's full playback deletes the message.
+  // Pausing or stopping early never fires 'ended', so it never counts.
+  // The sender playing their own voice does NOT delete it.
+  if (!m.view_once || m.sender_id === me.id || consumedVoiceIds.has(m.id)) return;
+  consumedVoiceIds.add(m.id);
+  try {
+    const r = await sb.rpc('consume_voice_message', { p_message_id: m.id });
+    if (!r.error && r.data === true) {
+      if (m.media_path) {
+        try { await sb.storage.from('voice-messages').remove([m.media_path]); } catch (e) { /* best-effort */ }
+      }
+      removeMessageElement(m.id);
+      refreshConversations();
+    }
+  } catch (e) { /* best-effort */ }
 }
 
 /* ---------- typing indicator ---------- */

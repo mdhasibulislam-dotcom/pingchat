@@ -8,7 +8,7 @@ import { ICE_SERVERS, CALL_TIMEOUT_MS } from './call-config.js';
 import { esc, formatDuration } from './ui.js';
 import { getOrCreateConversation } from './chats.js';
 import { setCallHistoryRefresher } from './app.js';
-import { loadFriendProfiles } from './friends.js';
+import { loadFriendProfiles, checkBlockDirection, isBlockedEither } from './friends.js';
 
 let me = null;
 let myChannel = null;
@@ -93,6 +93,9 @@ export async function startCall(conversationId, peer, kind) {
   if (!me) return;
   if (current) { toast('You are already in a call.', 'error'); return; }
   if (!peer || !peer.id) { toast('Cannot call this person right now.', 'error'); return; }
+  const blockDir = await checkBlockDirection(peer.id);
+  if (blockDir === 'i_blocked') { toast('You blocked this user.', 'error'); return; }
+  if (blockDir === 'blocked_me') { toast('You cannot call this user.', 'error'); return; }
   const callId = (crypto.randomUUID ? crypto.randomUUID() : 'call-' + Date.now() + '-' + Math.random().toString(36).slice(2));
   const { error } = await sb.from('calls').insert({
     id: callId, conversation_id: conversationId, caller_id: me.id, callee_id: peer.id, kind, status: 'ringing'
@@ -147,6 +150,13 @@ async function onOffer(payload) {
   if (current) {
     // Busy: auto-decline so the caller is not left ringing.
     await sendSignal(payload.from.id, 'call-decline', { callId: payload.callId });
+    return;
+  }
+  // Blocked callers never get through: auto-decline silently.
+  const blockDir = await checkBlockDirection(payload.from.id);
+  if (blockDir !== 'none') {
+    await sendSignal(payload.from.id, 'call-decline', { callId: payload.callId });
+    await updateCall(payload.callId, { status: 'declined' });
     return;
   }
   current = {
@@ -454,7 +464,9 @@ export async function renderCallFriends() {
       (pr.data || []).forEach((p) => byId.set(p.id, p));
     } catch (e) { /* ignore */ }
   }
-  const rows = [...byId.values()].sort((a, b) => (a.full_name || a.username || '').localeCompare(b.full_name || b.username || ''));
+  const rows = [...byId.values()]
+    .filter((p) => !isBlockedEither(p.id))
+    .sort((a, b) => (a.full_name || a.username || '').localeCompare(b.full_name || b.username || ''));
   if (!rows.length) {
     list.innerHTML = '<div class="empty">' + icon('users', 48) + '<h3>No friends yet</h3><p>Add friends from People to call them here.</p></div>';
     return;
