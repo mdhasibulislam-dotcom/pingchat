@@ -453,7 +453,7 @@ function appendMessage(m, scroll) {
   div.dataset.sender = m.sender_id;
   div.dataset.createdAt = m.created_at;
   const ticks = mine
-    ? '<span class="ticks' + (isRead(m) ? ' read' : '') + '">' + (isRead(m) ? '✓✓' : '✓') + '</span>'
+    ? '<span class="ticks' + (isRead(m) ? ' read' : '') + '">' + (isRead(m) ? '<span class="seen-badge">✓</span>' : '✓') + '</span>'
     : '';
   div.innerHTML = '<div class="msg-row"><div class="bubble-wrap">'
     + quoteHtml(m)
@@ -501,7 +501,7 @@ function renderMessagesTicks() {
     if (!t) return;
     const read = !!otherLastReadAt && new Date(otherLastReadAt) >= new Date(el.dataset.createdAt);
     t.classList.toggle('read', read);
-    t.textContent = read ? '✓✓' : '✓';
+    t.innerHTML = read ? '<span class="seen-badge">✓</span>' : '✓';
   });
 }
 function scrollToBottom() {
@@ -966,14 +966,18 @@ function stopTypingBroadcast() {
 }
 function showTyping(name) {
   typingVisibleFor = name;
-  $('typingInd').textContent = name + ' is typing…';
+  const el = $('typingInd');
+  if (!el) return;
+  // No name text: the peer's avatar + three waving dots, like Messenger.
+  const avatar = activeOther ? avatarHtml(activeOther, 'sm') : '';
+  el.innerHTML = avatar + '<span class="typing-dots" aria-label="typing"><span></span><span></span><span></span></span>';
   clearTimeout(typingTimeout);
   typingTimeout = setTimeout(hideTyping, 3000);
 }
 function hideTyping() {
   typingVisibleFor = null;
   const el = $('typingInd');
-  if (el) el.textContent = '';
+  if (el) el.innerHTML = '';
   clearTimeout(typingTimeout);
 }
 
