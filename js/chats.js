@@ -309,6 +309,16 @@ export async function openConversation(id) {
   subscribeRoom(id);
   markRead();
   renderConversationLists();
+
+  // Opened from a notification's Reply button (?reply=1): focus the composer
+  // so the user can type straight away, then drop the param.
+  try {
+    if (new URLSearchParams(window.location.search).get('reply') === '1') {
+      const inp = $('msgInput');
+      if (inp) inp.focus();
+      history.replaceState(null, '', window.location.pathname + window.location.hash);
+    }
+  } catch (e) { /* focus is best-effort */ }
 }
 
 export function closeChat() {

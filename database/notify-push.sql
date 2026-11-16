@@ -5,8 +5,12 @@
 -- WHAT IT DOES
 -- 1. New chat message  -> the other participant's phone gets a push
 --    notification ("<sender name>" / message preview, or "Voice message").
+--    Style: the sender's profile photo is the notification icon, and the
+--    notification has two buttons — Reply (opens the chat with the
+--    composer focused) and Open chat.
 -- 2. New call (status 'ringing') -> the callee's phone gets a push
---    notification ("Incoming audio/video call from <caller name>").
+--    notification ("Incoming audio/video call from <caller name>"),
+--    with the caller's profile photo as the icon.
 -- The push is sent from the database itself (Postgres trigger + pg_net),
 -- so it works even when the recipient's app is closed. No server needed.
 --
@@ -32,7 +36,7 @@
 --   DROP TRIGGER IF EXISTS calls_notify_push ON public.calls;
 --   DROP FUNCTION IF EXISTS public.notify_message_push();
 --   DROP FUNCTION IF EXISTS public.notify_call_push();
---   DROP FUNCTION IF EXISTS public.onesignal_send_push(text, text, text, jsonb, text);
+--   DROP FUNCTION IF EXISTS public.onesignal_send_push(text, text, text, jsonb, text, text, jsonb);
 --
 -- API verified against the official OneSignal docs (2026-11-16):
 --   Endpoint: POST https://api.onesignal.com/notifications?c=push
@@ -58,12 +62,18 @@ CREATE EXTENSION IF NOT EXISTS pg_net WITH SCHEMA extensions;
 -- A push failure can never break anything: every error is swallowed.
 -- ============================================================
 
+-- Drop the old 5-argument helper first: CREATE OR REPLACE cannot change
+-- the argument list, so the old version must go before the new one lands.
+DROP FUNCTION IF EXISTS public.onesignal_send_push(text, text, text, jsonb, text);
+
 CREATE OR REPLACE FUNCTION public.onesignal_send_push(
   p_external_user_id text,
   p_heading text,
   p_body text,
   p_data jsonb,
-  p_web_url text
+  p_web_url text,
+  p_icon text DEFAULT NULL,
+  p_buttons jsonb DEFAULT NULL
 )
 RETURNS void
 LANGUAGE plpgsql
@@ -100,6 +110,15 @@ BEGIN
   IF p_web_url IS NOT NULL THEN
     v_payload := v_payload || jsonb_build_object('web_url', p_web_url);
   END IF;
+  -- Style 1: the sender's photo as the notification icon (Chrome web push).
+  -- Only a real https URL is sent; otherwise OneSignal uses the default icon.
+  IF p_icon IS NOT NULL AND p_icon <> '' THEN
+    v_payload := v_payload || jsonb_build_object('chrome_web_icon', p_icon);
+  END IF;
+  -- Style 3: action buttons (Chrome web push supports up to 2).
+  IF p_buttons IS NOT NULL THEN
+    v_payload := v_payload || jsonb_build_object('web_buttons', p_buttons);
+  END IF;
 
   v_headers := jsonb_build_object(
     'Content-Type', 'application/json',
@@ -134,21 +153,36 @@ SET search_path = public, extensions
 AS $$
 DECLARE
   v_sender_name text;
+  v_sender_icon text;
   v_preview text;
+  v_chat_url text;
+  v_buttons jsonb;
   r record;
 BEGIN
-  -- Sender display name: full name, else username, else "Someone".
-  SELECT COALESCE(NULLIF(btrim(full_name), ''), NULLIF(btrim(username), ''), 'Someone')
-    INTO v_sender_name
+  -- Sender display name + photo: full name, else username, else "Someone".
+  SELECT COALESCE(NULLIF(btrim(full_name), ''), NULLIF(btrim(username), ''), 'Someone'),
+         NULLIF(btrim(avatar_url), '')
+    INTO v_sender_name, v_sender_icon
     FROM public.profiles WHERE id = NEW.sender_id;
   -- If the sender has no profile row at all (should not happen), fall back.
   v_sender_name := COALESCE(v_sender_name, 'Someone');
+  -- Only a public https photo can be a notification icon.
+  IF v_sender_icon IS NOT NULL AND v_sender_icon NOT LIKE 'https://%' THEN
+    v_sender_icon := NULL;
+  END IF;
 
   v_preview := CASE WHEN NEW.kind = 'voice' THEN 'Voice message'
                     ELSE left(COALESCE(NEW.body, ''), 100) END;
   IF v_preview = '' THEN
     v_preview := 'New message';
   END IF;
+
+  v_chat_url := 'https://mdhasibulislam-dotcom.github.io/pingchat/#/chat/' || NEW.conversation_id::text;
+  -- Reply opens the chat with the composer focused; Open chat just opens it.
+  v_buttons := jsonb_build_array(
+    jsonb_build_object('id', 'reply', 'text', 'Reply', 'url', 'https://mdhasibulislam-dotcom.github.io/pingchat/?reply=1#/chat/' || NEW.conversation_id::text),
+    jsonb_build_object('id', 'open', 'text', 'Open chat', 'url', v_chat_url)
+  );
 
   -- Every other participant of the conversation (1-to-1 chats have one).
   FOR r IN
@@ -165,7 +199,9 @@ BEGIN
         'conversation_id', NEW.conversation_id::text,
         'sender_id', NEW.sender_id::text
       ),
-      'https://mdhasibulislam-dotcom.github.io/pingchat/#/chat/' || NEW.conversation_id::text
+      v_chat_url,
+      v_sender_icon,
+      v_buttons
     );
   END LOOP;
 
@@ -193,6 +229,7 @@ SET search_path = public, extensions
 AS $$
 DECLARE
   v_caller_name text;
+  v_caller_icon text;
   v_text text;
 BEGIN
   -- Only the initial ringing row notifies. Status changes afterwards
@@ -201,11 +238,16 @@ BEGIN
     RETURN NEW;
   END IF;
 
-  SELECT COALESCE(NULLIF(btrim(full_name), ''), NULLIF(btrim(username), ''), 'Someone')
-    INTO v_caller_name
+  SELECT COALESCE(NULLIF(btrim(full_name), ''), NULLIF(btrim(username), ''), 'Someone'),
+         NULLIF(btrim(avatar_url), '')
+    INTO v_caller_name, v_caller_icon
     FROM public.profiles WHERE id = NEW.caller_id;
   -- If the caller has no profile row at all (should not happen), fall back.
   v_caller_name := COALESCE(v_caller_name, 'Someone');
+  -- Only a public https photo can be a notification icon.
+  IF v_caller_icon IS NOT NULL AND v_caller_icon NOT LIKE 'https://%' THEN
+    v_caller_icon := NULL;
+  END IF;
 
   v_text := CASE WHEN NEW.kind = 'video'
                  THEN 'Incoming video call from ' || v_caller_name
@@ -220,7 +262,9 @@ BEGIN
       'call_id', NEW.id::text,
       'kind', NEW.kind
     ),
-    'https://mdhasibulislam-dotcom.github.io/pingchat/#/calls'
+    'https://mdhasibulislam-dotcom.github.io/pingchat/#/calls',
+    v_caller_icon,
+    NULL
   );
 
   RETURN NEW;
