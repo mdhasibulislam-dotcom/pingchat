@@ -552,7 +552,12 @@ function openMsgMenu(msgId, anchor) {
     b.type = 'button';
     b.className = 'msg-menu-item' + (danger ? ' danger' : '');
     b.textContent = label;
-    b.addEventListener('click', fn);
+    // Stop propagation: without this, the document outside-click handler
+    // runs after the item handler (bubbling) and closes the menu. For
+    // "React" the click replaces menu.innerHTML (showEmojiPicker), which
+    // detaches the clicked button, so menu.contains(e.target) is false
+    // and the emoji picker closes in the same tap.
+    b.addEventListener('click', (e) => { e.stopPropagation(); fn(); });
     menu.append(b);
   };
   mkItem('React', () => showEmojiPicker(msgId));
@@ -702,7 +707,8 @@ let recState = null;    // { stream, recorder, chunks, mime, startAt, timerId, s
 let previewState = null; // { blob, url, mime, duration, audio, playing }
 
 function onMicClick() {
-  if (recState || previewState) return;
+  if (previewState) { toast('Finish or cancel the current voice clip first.'); return; }
+  if (recState) { toast('Recording already in progress — tap Stop to finish.'); return; }
   startVoiceRecording();
 }
 
@@ -715,7 +721,12 @@ async function startVoiceRecording() {
   try {
     stream = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch (e) {
-    toast('Microphone unavailable: ' + (e && (e.message || e.name) || 'permission denied'), 'error');
+    const errName = e && e.name;
+    if (errName === 'NotAllowedError' || errName === 'SecurityError' || errName === 'PermissionDeniedError') {
+      toast('Microphone is blocked. Tap the lock icon in the address bar → Site settings → Microphone → Allow, then tap the mic again.', 'error');
+    } else {
+      toast('Microphone unavailable: ' + (e && (e.message || errName) || 'permission denied'), 'error');
+    }
     return;
   }
   const mime = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg'].find((t) => {
