@@ -435,12 +435,13 @@ function markQuotesDeleted(id) {
   });
 }
 
-function voiceBubbleHtml(m) {
+function voiceBubbleHtml(m, foot) {
   return '<span class="bubble voice-bubble"><span class="voice-player">'
     + '<button class="voice-play" type="button" aria-label="Play voice message">' + icon('play', 16) + '</button>'
     + '<span class="voice-prog"><span class="voice-prog-fill"></span></span>'
     + '<span class="voice-dur">0:00</span></span>'
     + (m.view_once ? '<span class="voice-once">View once</span>' : '')
+    + foot
     + '</span>';
 }
 
@@ -468,12 +469,14 @@ function appendMessage(m, scroll) {
   div.dataset.sender = m.sender_id;
   div.dataset.createdAt = m.created_at;
   const ticks = mine ? ticksHtml(m) : '';
+  // Time + delivery ticks live INSIDE the bubble, small at the bottom-right
+  // (WhatsApp style) — no extra line under the message.
+  const foot = '<span class="msg-foot">' + fmtTime(m.created_at) + ticks + '</span>';
   div.innerHTML = '<div class="msg-row"><div class="bubble-wrap">'
     + quoteHtml(m)
-    + (m.kind === 'voice' ? voiceBubbleHtml(m) : '<span class="bubble">' + esc(m.body || '') + '</span>')
+    + (m.kind === 'voice' ? voiceBubbleHtml(m, foot) : '<span class="bubble">' + esc(m.body || '') + foot + '</span>')
     + '<div class="reactions"></div>'
-    + '</div><button class="msg-menu-btn" type="button" aria-label="Message options">' + icon('more', 16) + '</button></div>'
-    + '<span class="meta">' + fmtTime(m.created_at) + ticks + '</span>';
+    + '</div><button class="msg-menu-btn" type="button" aria-label="Message options">' + icon('more', 16) + '</button></div>';
   list.append(div);
   wireMessage(div, m);
   renderReactions(m.id);

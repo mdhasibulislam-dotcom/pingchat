@@ -231,12 +231,20 @@ svg.icon { width: 20px; height: 20px; flex: none; }
 }
 .msg.me { align-self: flex-end; align-items: flex-end; }
 .msg.me .bubble { background: var(--bubble-me); color: var(--bubble-me-text); border: none; }
-.msg .meta { font-size: 11px; color: var(--muted); margin-top: 3px; display: flex; gap: 4px; align-items: center; }
-.msg.me .meta { justify-content: flex-end; }
-.msg .meta .ticks { font-size: 12px; }
-.msg .meta .ticks.read { color: var(--primary); }
-/* Seen: the double tick becomes a round badge with a tick inside. */
-.msg .meta .ticks .seen-badge { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%; background: var(--primary); color: #fff; font-size: 10px; line-height: 1; }
+/* Time + ticks sit INSIDE the bubble, small at the bottom-right corner
+   (WhatsApp style): floated right so they hug the last line of text and
+   take no extra line under the message. */
+.msg .bubble .msg-foot { float: right; display: inline-flex; align-items: center; gap: 3px; font-size: 11px; line-height: 1; color: var(--muted); margin: 7px 0 0 8px; }
+.msg .bubble .msg-foot .ticks { font-size: 12px; }
+.msg .bubble .msg-foot .ticks.read { color: var(--primary); }
+/* Seen: the double tick becomes a small round badge with a tick inside. */
+.msg .bubble .msg-foot .seen-badge { display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; border-radius: 50%; background: var(--primary); color: #fff; font-size: 9px; line-height: 1; }
+/* Own bubble is emerald: foot + ticks stay light so they read on green. */
+.msg.me .bubble .msg-foot { color: rgba(255,255,255,.8); }
+.msg.me .bubble .msg-foot .ticks.read { color: #fff; }
+.msg.me .bubble .msg-foot .seen-badge { background: #fff; color: var(--primary); }
+/* Voice bubble is a flex column, so the foot aligns itself to the end. */
+.bubble.voice-bubble .msg-foot { float: none; align-self: flex-end; margin: 2px 0 0; }
 .day-sep { align-self: center; font-size: 12px; color: var(--muted); background: var(--card); border: 1px solid var(--border); padding: 3px 12px; border-radius: 999px; margin: 8px 0; }
 .typing-ind { display: flex; align-items: center; gap: 8px; padding: 2px 16px 8px; min-height: 26px; }
 .typing-ind:empty { display: none; }
@@ -445,8 +453,6 @@ svg.icon { width: 20px; height: 20px; flex: none; }
 .bubble-wrap { min-width: 0; max-width: 100%; display: flex; flex-direction: column; }
 .msg .bubble { width: fit-content; max-width: 100%; }
 .msg.me .bubble-wrap { align-items: flex-end; }
-.msg .meta { align-self: flex-start; }
-.msg.me .meta { align-self: flex-end; }
 
 /* Per-message three-dot menu button (hover on desktop, always on touch). */
 .msg-menu-btn {
