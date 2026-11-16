@@ -12,7 +12,7 @@ import { initCalls, endCallIfActive, renderCallFriends } from './calls.js';
 import { initPeople, loadPeople } from './people.js';
 import { initProfile, loadProfile } from './profile.js';
 import { initSettings, loadSettings } from './settings.js';
-import { initPush, setPushUser } from './push.js';
+import { initPush, setPushUser, getPushState, promptPush } from './push.js';
 
 const AUTH_VIEWS = ['login', 'register', 'reset'];
 const APP_VIEWS = ['chats', 'chat', 'calls', 'people', 'profile', 'settings'];
@@ -124,6 +124,23 @@ function renderMeCard() {
   $('topAvatar').innerHTML = avatarHtml(p, 'sm');
 }
 
+/* Ask once, on the first login after this ships, whether the user wants
+ * push notifications. The flag is set before asking, whether they allow
+ * or dismiss, so it never nags. Runs in the background; never blocks
+ * setupUser or the rest of boot. */
+async function maybePromptPushOnce() {
+  try {
+    if (localStorage.getItem('pingchat-push-prompted')) return;
+    const st = await getPushState();
+    if (!st || !st.supported) return;
+    if (st.permission !== 'default' || st.optedIn) return;
+    try { localStorage.setItem('pingchat-push-prompted', '1'); } catch (e) {}
+    await promptPush();
+  } catch (e) {
+    console.warn('push prompt once failed', e);
+  }
+}
+
 /* ---------- service worker (PWA: offline shell + installable app) ---------- */
 function registerServiceWorker() {
   // A failure here must never break the app — log and carry on.
@@ -144,6 +161,8 @@ async function setupUser(user) {
   PC.state.profile = await ensureProfile(user);
   // Link this device's push subscription to the signed-in user (OneSignal).
   setPushUser(user.id, PC.state.profile && PC.state.profile.username);
+  // Ask once about push notifications; never nags (see maybePromptPushOnce).
+  maybePromptPushOnce();
   renderMeCard();
   initPresence(user);
   initCalls(user);

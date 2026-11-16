@@ -248,7 +248,7 @@
     <section class="view" id="view-settings" hidden>
       <div class="view-head settings-head">
         <button class="icon-btn" id="settingsBackBtn" type="button" aria-label="Back to profile"></button>
-        <div><h2>Settings</h2><p>Appearance, privacy, sound and security.</p></div>
+        <div><h2>Settings</h2><p>Appearance, privacy, sound, notifications and security.</p></div>
       </div>
       <div class="view-pad"><div class="profile-wrap">
         <div class="card">
@@ -269,6 +269,16 @@
             <span>Incoming call ringtone</span>
             <button class="switch" id="ringtoneToggle" type="button" role="switch" aria-checked="true"><span class="knob"></span></button>
           </div>
+        </div>
+        <div class="card">
+          <h3>Notifications</h3>
+          <p class="hint" style="margin-top:0">Get a notification on this phone when someone sends you a message or calls you.</p>
+          <div class="setting-row">
+            <span>Push notifications</span>
+            <b id="pushStateLabel">Checking…</b>
+          </div>
+          <p class="hint" id="pushStateHint" hidden></p>
+          <button class="btn btn-primary btn-block" id="pushToggleBtn" type="button" hidden>Turn on notifications</button>
         </div>
         <div class="card" id="installCard" hidden>
           <h3>Install app</h3>

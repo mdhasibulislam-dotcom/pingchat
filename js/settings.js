@@ -5,9 +5,11 @@ import { showMsg } from './ui.js';
 import { logout } from './auth.js';
 import { toggleTheme } from './app.js';
 import { getInstallPrompt, onInstallPromptChange, promptInstall } from './install.js';
+import { getPushState, promptPush, optOut } from './push.js';
 
 let me = null;
 let settingsInitialized = false;
+let pushBusy = false;
 
 const $ = (id) => document.getElementById(id);
 
@@ -24,12 +26,14 @@ export function initSettings(user) {
   $('changePassForm').addEventListener('submit', onChangePassword);
   $('settingsLogoutBtn').addEventListener('click', logout);
   $('installAppBtn').addEventListener('click', onInstallAppTap);
+  $('pushToggleBtn').addEventListener('click', onPushToggle);
   onInstallPromptChange(syncInstallRow);
 }
 
 export function loadSettings() {
   syncThemeRow();
   syncInstallRow();
+  syncPushRow();
   const p = PC.state.profile;
   const isPublic = !p || p.is_public !== false;
   setSwitch($('privacyToggle'), isPublic);
@@ -98,6 +102,78 @@ function onRingtoneToggle() {
   setRingtoneEnabled(next);
   setSwitch($('ringtoneToggle'), next);
   toast(next ? 'Ringtone on.' : 'Ringtone off.');
+}
+
+/* ---------- notifications ---------- */
+// Refreshes every time the Settings view opens (loadSettings).
+async function syncPushRow() {
+  const label = $('pushStateLabel');
+  const hint = $('pushStateHint');
+  const btn = $('pushToggleBtn');
+  if (!label || !btn) return;
+  label.textContent = 'Checking…';
+  if (hint) hint.hidden = true;
+  btn.hidden = true;
+  let st;
+  try { st = await getPushState(); } catch (e) { st = { supported: false }; }
+  if (!st || !st.supported) {
+    label.textContent = 'Not available';
+    if (hint) {
+      hint.hidden = false;
+      hint.textContent = st && st.initError
+        ? 'Push is unavailable: ' + st.initError
+        : 'Try Chrome — some browsers block push notifications.';
+    }
+    btn.hidden = true;
+    return;
+  }
+  if (st.permission === 'denied') {
+    label.textContent = 'Blocked';
+    if (hint) {
+      hint.hidden = false;
+      hint.textContent = 'Allow notifications for this site in your browser settings.';
+    }
+    btn.hidden = true;
+    return;
+  }
+  if (st.optedIn) {
+    label.textContent = 'On';
+    if (hint) hint.hidden = true;
+    btn.hidden = false;
+    btn.textContent = 'Turn off notifications';
+    return;
+  }
+  label.textContent = 'Off';
+  if (hint) hint.hidden = true;
+  btn.hidden = false;
+  btn.textContent = 'Turn on notifications';
+}
+
+async function onPushToggle() {
+  if (pushBusy) return;
+  let st;
+  try { st = await getPushState(); } catch (e) { st = { supported: false }; }
+  if (!st || !st.supported) { await syncPushRow(); return; }
+  const btn = $('pushToggleBtn');
+  pushBusy = true;
+  if (btn) btn.disabled = true;
+  try {
+    if (st.optedIn) {
+      await optOut();
+      toast('Notifications turned off.');
+    } else {
+      const shown = await promptPush();
+      const after = await getPushState();
+      if (after.optedIn) toast('Notifications are on.', 'success');
+      else if (after.permission === 'denied') toast('Notifications are blocked for this site. Allow them in your browser settings.', 'error');
+      else if (!shown) toast('Could not turn on notifications. Try again from Settings.', 'error');
+      else toast('Notifications are still off.');
+    }
+  } finally {
+    pushBusy = false;
+    if (btn) btn.disabled = false;
+    await syncPushRow();
+  }
 }
 
 /* ---------- security: change password ---------- */
