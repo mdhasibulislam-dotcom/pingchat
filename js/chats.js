@@ -63,7 +63,9 @@ export function initChats(user) {
     const menu = $('msgMenu');
     if (!menu || menu.hidden) return;
     if (menu.contains(e.target)) return;
-    if (e.target.closest && e.target.closest('.msg-menu-btn')) return;
+    // The click right after a long-press opened the menu is part of that
+    // same press — it must not close the menu it just opened.
+    if (Date.now() - menuOpenedByLongPress < 600) return;
     closeMsgMenu();
   });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeMsgMenu(); });
@@ -489,7 +491,7 @@ function appendMessage(m, scroll) {
     + quoteHtml(m)
     + (m.kind === 'voice' ? voiceBubbleHtml(m, foot) : '<span class="bubble">' + esc(m.body || '') + foot + '</span>')
     + '<div class="reactions"></div>'
-    + '</div><button class="msg-menu-btn" type="button" aria-label="Message options">' + icon('more', 16) + '</button></div>';
+    + '</div></div>';
   list.append(div);
   wireMessage(div, m);
   renderReactions(m.id);
@@ -500,10 +502,43 @@ function appendMessage(m, scroll) {
 }
 
 function wireMessage(div, m) {
-  const menuBtn = div.querySelector('.msg-menu-btn');
-  if (menuBtn) menuBtn.addEventListener('click', (e) => { e.stopPropagation(); openMsgMenu(m.id, menuBtn); });
+  // Long-press a message to open its menu (React / Reply / Copy / Delete),
+  // Messenger style. No three-dot button anymore. A short tap still does
+  // what it always did (play voice, jump to a quoted message).
+  const bubble = div.querySelector('.bubble');
+  let lpTimer = null;
+  let lpStartX = 0, lpStartY = 0;
+  const cancelPress = () => { if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; } };
+  div.addEventListener('pointerdown', (e) => {
+    // Buttons inside the message (play, reaction chips) keep their own tap.
+    if (e.target.closest && e.target.closest('.voice-play, .react-chip')) return;
+    lpStartX = e.clientX; lpStartY = e.clientY;
+    cancelPress();
+    lpTimer = setTimeout(() => {
+      lpTimer = null;
+      menuOpenedByLongPress = Date.now();
+      openMsgMenu(m.id, bubble || div);
+    }, 500);
+  });
+  // Moving the finger (scrolling) cancels the long-press.
+  div.addEventListener('pointermove', (e) => {
+    if (lpTimer && (Math.abs(e.clientX - lpStartX) > 10 || Math.abs(e.clientY - lpStartY) > 10)) cancelPress();
+  });
+  div.addEventListener('pointerup', cancelPress);
+  div.addEventListener('pointerleave', cancelPress);
+  div.addEventListener('pointercancel', cancelPress);
+  // Right-click (desktop) opens the menu too.
+  div.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    cancelPress();
+    openMsgMenu(m.id, bubble || div);
+  });
   const quote = div.querySelector('.quote');
-  if (quote) quote.addEventListener('click', () => jumpToMessage(m.reply_to_id));
+  if (quote) quote.addEventListener('click', () => {
+    // A long-press on the quote opens the menu; don't jump as well.
+    if (Date.now() - menuOpenedByLongPress < 600) return;
+    jumpToMessage(m.reply_to_id);
+  });
   const playBtn = div.querySelector('.voice-play');
   if (playBtn) playBtn.addEventListener('click', () => toggleVoicePlayback(m));
   const prog = div.querySelector('.voice-prog');
@@ -588,6 +623,9 @@ async function markRead() {
 }
 
 /* ---------- message menu: react / reply / delete ---------- */
+// Timestamp of the last menu opened by a long-press (ms). The click that
+// ends that same press must not immediately close the menu again.
+let menuOpenedByLongPress = 0;
 function openMsgMenu(msgId, anchor) {
   const m = messagesById.get(msgId);
   if (!m) return;
@@ -609,6 +647,14 @@ function openMsgMenu(msgId, anchor) {
   };
   mkItem('React', () => showEmojiPicker(msgId));
   mkItem('Reply', () => { closeMsgMenu(); startReply(msgId); });
+  if (m.kind !== 'voice' && m.body) {
+    mkItem('Copy', () => {
+      closeMsgMenu();
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(m.body).then(() => toast('Copied')).catch(() => toast('Could not copy'));
+      }
+    });
+  }
   if (mine) {
     mkItem('Delete for me', () => { closeMsgMenu(); deleteForMe(msgId); });
     mkItem('Delete for everyone', () => { closeMsgMenu(); deleteForEveryone(msgId); }, true);

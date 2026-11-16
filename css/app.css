@@ -201,18 +201,24 @@ svg.icon { width: 20px; height: 20px; flex: none; }
 .avatar {
   width: 46px; height: 46px; border-radius: 50%; flex: none;
   display: inline-flex; align-items: center; justify-content: center;
-  color: #fff; font-weight: 700; font-size: 16px; position: relative; overflow: hidden;
+  color: #fff; font-weight: 700; font-size: 16px; position: relative;
   background: var(--primary);
 }
-.avatar img { width: 100%; height: 100%; object-fit: cover; }
+.avatar img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; }
 .avatar.sm { width: 36px; height: 36px; font-size: 13px; }
 .avatar.xs { width: 28px; height: 28px; font-size: 11px; }
 .avatar.lg { width: 84px; height: 84px; font-size: 30px; }
+/* Online dot, Messenger style: it straddles the bottom-right edge of the
+   photo, mostly outside it, with a light ring so it reads on any photo.
+   (The avatar must NOT have overflow:hidden, or the outside part is cut.) */
 .avatar .dot {
-  position: absolute; right: 0; bottom: 1px; width: 12px; height: 12px;
+  position: absolute; right: -3px; bottom: -3px; width: 12px; height: 12px;
   border-radius: 50%; background: #94A3B8; border: 2px solid var(--card);
 }
 .avatar .dot.on { background: #22C55E; }
+.avatar.sm .dot { width: 11px; height: 11px; right: -2px; bottom: -2px; }
+.avatar.xs .dot { width: 9px; height: 9px; right: -2px; bottom: -2px; border-width: 1.5px; }
+.avatar.lg .dot { width: 16px; height: 16px; right: -4px; bottom: -4px; border-width: 3px; }
 
 /* ---------- chat window ---------- */
 .chat-head {
@@ -228,6 +234,8 @@ svg.icon { width: 20px; height: 20px; flex: none; }
 .msg .bubble {
   padding: 9px 13px; border-radius: 16px; word-break: break-word; white-space: pre-wrap;
   background: var(--bubble-them); border: 1px solid var(--border); box-shadow: var(--shadow);
+  /* Long-press opens the message menu: no text selection / callout on hold. */
+  user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
 }
 .msg.me { align-self: flex-end; align-items: flex-end; }
 .msg.me .bubble { background: var(--bubble-me); color: var(--bubble-me-text); border: none; }
@@ -455,17 +463,6 @@ svg.icon { width: 20px; height: 20px; flex: none; }
 .bubble-wrap { min-width: 0; max-width: 100%; display: flex; flex-direction: column; }
 .msg .bubble { width: fit-content; max-width: 100%; }
 .msg.me .bubble-wrap { align-items: flex-end; }
-
-/* Per-message three-dot menu button (hover on desktop, always on touch). */
-.msg-menu-btn {
-  flex: none; width: 28px; height: 28px; border-radius: 50%; border: none;
-  background: transparent; color: var(--muted);
-  display: inline-flex; align-items: center; justify-content: center;
-  opacity: 0; transition: opacity .15s; cursor: pointer;
-}
-.msg-menu-btn:hover { background: var(--card-2); color: var(--text); }
-.msg:hover .msg-menu-btn, .msg-menu-btn:focus-visible { opacity: 1; }
-@media (hover: none) { .msg-menu-btn { opacity: .55; } }
 
 /* Floating message menu + emoji picker. */
 .msg-menu {
