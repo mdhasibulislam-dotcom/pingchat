@@ -123,6 +123,20 @@ function renderMeCard() {
   $('topAvatar').innerHTML = avatarHtml(p, 'sm');
 }
 
+/* ---------- service worker (PWA: offline shell + installable app) ---------- */
+function registerServiceWorker() {
+  // A failure here must never break the app — log and carry on.
+  try {
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('sw.js').catch((e) => {
+        console.warn('Service worker registration failed', e);
+      });
+    }
+  } catch (e) {
+    console.warn('Service worker not available', e);
+  }
+}
+
 /* ---------- boot ---------- */
 async function setupUser(user) {
   PC.state.me = user;
@@ -141,6 +155,7 @@ async function boot() {
   if (booted) return;
   booted = true;
   initTheme();
+  registerServiceWorker();
 
   // Static icons in the shell.
   $('searchIcon').innerHTML = icon('search', 18);

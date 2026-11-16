@@ -4,6 +4,7 @@ import { sb, PC, toast, icon, ringtoneEnabled, setRingtoneEnabled } from './conf
 import { showMsg } from './ui.js';
 import { logout } from './auth.js';
 import { toggleTheme } from './app.js';
+import { getInstallPrompt, onInstallPromptChange, promptInstall } from './install.js';
 
 let me = null;
 let settingsInitialized = false;
@@ -22,10 +23,13 @@ export function initSettings(user) {
   $('ringtoneToggle').addEventListener('click', onRingtoneToggle);
   $('changePassForm').addEventListener('submit', onChangePassword);
   $('settingsLogoutBtn').addEventListener('click', logout);
+  $('installAppBtn').addEventListener('click', onInstallAppTap);
+  onInstallPromptChange(syncInstallRow);
 }
 
 export function loadSettings() {
   syncThemeRow();
+  syncInstallRow();
   const p = PC.state.profile;
   const isPublic = !p || p.is_public !== false;
   setSwitch($('privacyToggle'), isPublic);
@@ -45,6 +49,25 @@ function syncThemeRow() {
   if (ic) ic.innerHTML = icon(dark ? 'sun' : 'moon', 20);
   const lb = $('settingsThemeLabel');
   if (lb) lb.textContent = dark ? 'Switch to light theme' : 'Switch to dark theme';
+}
+
+/* ---------- install app (Android PWA) ---------- */
+// The Install card shows ONLY when the browser offers installation
+// (beforeinstallprompt fired). On desktop/iOS it stays hidden.
+function syncInstallRow() {
+  const card = $('installCard');
+  if (!card) return;
+  card.hidden = !getInstallPrompt();
+}
+
+async function onInstallAppTap() {
+  const btn = $('installAppBtn');
+  if (!btn) return;
+  btn.disabled = true;
+  const ok = await promptInstall();
+  btn.disabled = false;
+  syncInstallRow(); // prompt is consumed either way; hide the card
+  toast(ok ? 'PingChat installed. Look for it on your home screen.' : 'Install dismissed. You can try again later.', ok ? 'success' : undefined);
 }
 
 /* ---------- privacy ---------- */

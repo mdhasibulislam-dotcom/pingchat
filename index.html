@@ -7,6 +7,11 @@
 <meta name="description" content="PingChat — fast, private real-time messaging with audio and video calls.">
 <title>PingChat</title>
 <link rel="icon" type="image/svg+xml" href="assets/icons/favicon.svg">
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="apple-touch-icon" href="assets/icons/icon-192.png">
 <link rel="stylesheet" href="css/app.css">
 <script>
   // Apply saved theme before first paint (avoids a flash of the wrong theme).
@@ -258,6 +263,11 @@
             <span>Incoming call ringtone</span>
             <button class="switch" id="ringtoneToggle" type="button" role="switch" aria-checked="true"><span class="knob"></span></button>
           </div>
+        </div>
+        <div class="card" id="installCard" hidden>
+          <h3>Install app</h3>
+          <p class="hint" style="margin-top:0">Add PingChat to your phone's home screen for a full-screen app experience.</p>
+          <button class="btn btn-primary btn-block" id="installAppBtn" type="button">Install PingChat on your phone</button>
         </div>
         <div class="card">
           <h3>Security</h3>
