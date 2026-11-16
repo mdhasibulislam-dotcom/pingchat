@@ -447,6 +447,17 @@ END $$;
 -- columns in sync for any client, old or new.
 ALTER TABLE public.messages ADD COLUMN IF NOT EXISTS body text;
 ALTER TABLE public.messages DROP CONSTRAINT IF EXISTS messages_content_len;
+-- Drop the old v1 validation trigger (trg_messages_validate, function
+-- validate_new_message) and v1-only check constraints: the v1 trigger
+-- rejects empty messages with 'Message cannot be empty.', but the v2
+-- app sends voice messages with an empty body, so the leftover trigger
+-- blocked every voice message.
+DROP TRIGGER IF EXISTS trg_messages_validate ON public.messages;
+ALTER TABLE public.messages DROP CONSTRAINT IF EXISTS messages_content_rules;
+ALTER TABLE public.messages DROP CONSTRAINT IF EXISTS messages_media_rules;
+ALTER TABLE public.messages DROP CONSTRAINT IF EXISTS messages_media_size_check;
+ALTER TABLE public.messages DROP CONSTRAINT IF EXISTS messages_duration_check;
+ALTER TABLE public.messages DROP CONSTRAINT IF EXISTS messages_type_check;
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'messages' AND column_name = 'content') THEN

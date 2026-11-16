@@ -3,7 +3,7 @@
 -- Run this whole file ONCE in the Supabase SQL Editor
 -- (Dashboard -> SQL Editor -> New query -> paste -> Run).
 --
--- It does two things:
+-- It does three things:
 --   1. Creates the missing 'voice-messages' storage bucket (with its
 --      read/insert/update/delete policies) so voice messages can be
 --      recorded, uploaded and played. Without it, sending a voice
@@ -11,6 +11,11 @@
 --   2. Allows changing a reaction: PostgREST upsert (toggle reaction)
 --      needs the UPDATE privilege plus an UPDATE policy on
 --      message_reactions. Without it, tapping a different emoji fails.
+--   3. Removes the old v1 validation trigger (trg_messages_validate)
+--      and v1-only check constraints on messages: the v1 trigger
+--      rejects empty messages with 'Message cannot be empty.', but
+--      the v2 app sends voice messages with an empty body — so every
+--      voice message was blocked by the leftover trigger.
 --
 -- Safe to re-run: every statement is guarded
 -- (ON CONFLICT ... DO UPDATE / DROP POLICY IF EXISTS).
@@ -58,4 +63,20 @@ CREATE POLICY "voice_delete_own" ON storage.objects
   FOR DELETE TO authenticated USING (
     bucket_id = 'voice-messages' AND (storage.foldername(name))[1] = auth.uid()::text
   );
+
+-- ---- 3. Remove old v1 validation leftovers on messages ----
+-- The first PingChat (v1) had a BEFORE INSERT trigger
+-- trg_messages_validate (function validate_new_message) that rejects
+-- empty text messages with 'Message cannot be empty.', plus check
+-- constraints written for v1's columns (message_type/content). The v2
+-- app sends voice messages with an empty body, so the leftover trigger
+-- blocked every voice message. Drop the trigger and the v1-only
+-- constraints; the v2 app does not use them.
+DROP TRIGGER IF EXISTS trg_messages_validate ON public.messages;
+ALTER TABLE public.messages DROP CONSTRAINT IF EXISTS messages_content_rules;
+ALTER TABLE public.messages DROP CONSTRAINT IF EXISTS messages_media_rules;
+ALTER TABLE public.messages DROP CONSTRAINT IF EXISTS messages_media_size_check;
+ALTER TABLE public.messages DROP CONSTRAINT IF EXISTS messages_duration_check;
+ALTER TABLE public.messages DROP CONSTRAINT IF EXISTS messages_type_check;
+ALTER TABLE public.messages DROP CONSTRAINT IF EXISTS messages_content_len;
 
