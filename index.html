@@ -316,7 +316,14 @@
 
 <!-- ======================= CALL UI ======================= -->
 <div class="call-overlay" id="callOverlay" hidden>
-  <video class="remote" id="remoteVideo" autoplay playsinline hidden></video>
+  <video class="remote" id="remoteVideo" autoplay playsinline muted hidden></video>
+  <!-- Dedicated remote-audio output: remote audio must NOT depend on the
+       <video> element. For audio-only calls the video is hidden
+       (display:none), and Chrome does not output audio from a hidden
+       video element — that was why audio calls connected but neither
+       side could hear anything. An <audio> element plays with no
+       visual surface, so it keeps working while hidden. -->
+  <audio id="remoteAudio" autoplay playsinline></audio>
   <div class="remote-fallback" id="remoteFallback">
     <span id="callAvatar"></span>
     <div class="call-status"><b id="callPeerName">…</b><span id="callStatus">Calling…</span></div>

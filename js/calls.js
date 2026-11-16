@@ -372,17 +372,41 @@ function makePeerConnection(callId, peerId) {
   pc.ontrack = (e) => {
     const c = current;
     if (!c || c.callId !== callId) return; // call already ended
+    // Collect incoming tracks into one persistent remote stream instead
+    // of trusting e.streams[0]: tracks arrive in separate ontrack
+    // events, and some browsers fire ontrack with no streams at all.
+    // A stream built this way always carries every track that arrived.
+    if (!c.remoteStream) c.remoteStream = new MediaStream();
+    if (e.track && !c.remoteStream.getTracks().includes(e.track)) c.remoteStream.addTrack(e.track);
+    const isVideo = c.kind === 'video';
+    // Audio always goes through the dedicated <audio> element (see
+    // index.html): it plays with no visual surface, so it keeps working
+    // for audio-only calls where the video element stays hidden.
+    const audio = $('remoteAudio');
+    if (audio) {
+      if (audio.srcObject !== c.remoteStream) audio.srcObject = c.remoteStream;
+      audio.play().catch(() => {});
+    }
     const remote = $('remoteVideo');
-    if (e.streams && e.streams[0]) {
-      remote.srcObject = e.streams[0];
-      const isVideo = c.kind === 'video';
-      remote.hidden = !isVideo;
-      $('remoteFallback').style.display = isVideo ? 'none' : 'flex';
-      $('callStatusBar').hidden = !isVideo;
-      if (isVideo) {
-        $('callPeerName2').textContent = c.peer.full_name || c.peer.username || '';
-        $('callAvatar').innerHTML = avatarHtml(c.peer, 'lg');
-      }
+    if (isVideo) {
+      // Muted on purpose: the audio comes from remoteAudio, so the
+      // video must not double it — and muted autoplay is never blocked
+      // by the browser's autoplay-with-sound policy.
+      if (remote.srcObject !== c.remoteStream) remote.srcObject = c.remoteStream;
+      remote.hidden = false;
+      // Never rely on the autoplay attribute alone: it only attempts
+      // playback once, and if that attempt fails (element still hidden,
+      // no user activation left when media arrives) the remote video
+      // stays black forever with nothing retrying it.
+      remote.play().catch(() => {});
+    } else {
+      remote.hidden = true;
+    }
+    $('remoteFallback').style.display = isVideo ? 'none' : 'flex';
+    $('callStatusBar').hidden = !isVideo;
+    if (isVideo) {
+      $('callPeerName2').textContent = c.peer.full_name || c.peer.username || '';
+      $('callAvatar').innerHTML = avatarHtml(c.peer, 'lg');
     }
   };
   pc.onconnectionstatechange = () => {
@@ -417,6 +441,23 @@ function showCallOverlay(statusText) {
   $('cameraBtn').style.display = c.kind === 'video' ? '' : 'none';
   $('endCallBtn').innerHTML = icon('phoneOff', 26);
   $('callOverlay').hidden = false;
+  // Race: on the callee side, remote media can arrive (ontrack) while
+  // the answer is still being sent, i.e. BEFORE this overlay is shown —
+  // and the reset above would then hide the remote video again with no
+  // second ontrack to bring it back. If remote media already arrived,
+  // re-attach and re-play it now that the overlay is visible.
+  if (c.remoteStream) {
+    const ra = $('remoteAudio');
+    if (ra) { ra.srcObject = c.remoteStream; ra.play().catch(() => {}); }
+    if (c.kind === 'video') {
+      const rv = $('remoteVideo');
+      rv.srcObject = c.remoteStream;
+      rv.hidden = false;
+      rv.play().catch(() => {});
+      $('remoteFallback').style.display = 'none';
+      $('callStatusBar').hidden = false;
+    }
+  }
 }
 
 function startTimer() {
@@ -486,6 +527,8 @@ export function endCallLocal() {
   $('incomingModal').hidden = true;
   const rv = $('remoteVideo');
   if (rv) rv.srcObject = null;
+  const ra = $('remoteAudio');
+  if (ra) ra.srcObject = null;
   const lv = $('localVideo');
   if (lv) lv.srcObject = null;
 }
