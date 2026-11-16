@@ -1,6 +1,8 @@
 /* PingChat v2 — calls: WebRTC audio/video calls.
  * Signaling: Supabase Realtime Broadcast on a per-user channel `calls:<userId>`.
- * Media: peer-to-peer WebRTC, Google free STUN (see js/call-config.js).
+ * Media: peer-to-peer WebRTC, Google free STUN + free OpenRelay TURN
+ * (see js/call-config.js). Without TURN, calls between two phones on
+ * mobile data usually connect at the signaling level but carry no audio.
  * Call rows live in the `calls` table (status: ringing/accepted/declined/missed/ended).
  */
 import { sb, PC, toast, avatarHtml, timeAgo, icon, ringtoneEnabled } from './config.js';
@@ -75,16 +77,28 @@ async function peerChannel(peerId) {
   return ch;
 }
 async function sendSignal(peerId, event, payload) {
-  try {
+  // One attempt on the (cached) channel; on failure drop the cached
+  // channel and retry once on a fresh one — a mobile connection drop
+  // can leave the cached channel dead, and every later candidate then
+  // fails with a toast. Only toast if the retry also fails.
+  const attempt = async () => {
     const ch = await peerChannel(peerId);
     const res = await ch.send({ type: 'broadcast', event, payload });
-    if (res !== 'ok') {
-      console.warn('signal send failed', event, res);
+    if (res !== 'ok') throw new Error('Signal send returned ' + res);
+  };
+  try {
+    await attempt();
+  } catch (e) {
+    console.warn('signal send failed, retrying on a fresh channel', event, e);
+    const stale = peerChannels.get(peerId);
+    peerChannels.delete(peerId);
+    if (stale) { try { stale.unsubscribe(); } catch (err) {} }
+    try {
+      await attempt();
+    } catch (e2) {
+      console.warn('signal send failed', event, e2);
       toast('Could not reach the other side. Check your connection and try again.', 'error');
     }
-  } catch (e) {
-    console.warn('signal send failed', event, e);
-    toast('Could not reach the other side. Check your connection and try again.', 'error');
   }
 }
 
@@ -372,7 +386,13 @@ function makePeerConnection(callId, peerId) {
     }
   };
   pc.onconnectionstatechange = () => {
-    if (pc.connectionState === 'failed' && current && current.callId === callId) {
+    if (!current || current.callId !== callId) return;
+    if (pc.connectionState === 'disconnected' && !current.disconnectedToastShown) {
+      // ICE can recover from a short disconnect on its own — warn once
+      // and stay on the call instead of hanging up.
+      current.disconnectedToastShown = true;
+      toast('Connection lost — trying to reconnect…');
+    } else if (pc.connectionState === 'failed') {
       toast('Connection failed. The other side may be unreachable (a TURN server may be needed).', 'error');
       hangUp();
     }
