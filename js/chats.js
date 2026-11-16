@@ -1,6 +1,6 @@
 /* PingChat v2 — chats: conversation list, messages, typing, read ticks,
  * reactions, replies, message delete, view-once voice messages. */
-import { sb, PC, toast, avatarHtml, timeAgo, fmtTime, fmtDate, icon, onPresenceChange } from './config.js';
+import { sb, PC, toast, avatarHtml, fmtListTime, fmtTime, fmtDate, icon, onPresenceChange } from './config.js';
 import { esc, debounce, formatDuration } from './ui.js';
 import { startCall } from './calls.js';
 import { openProfilePreview } from './friends.js';
@@ -176,7 +176,7 @@ function convRowHtml(c) {
   const badge = c.unread ? '<span class="badge">' + c.unread + '</span>' : '';
   return '<button class="conv-row' + (c.id === activeId ? ' active' : '') + '" data-conv="' + c.id + '" type="button">'
     + avatarHtml(c.other)
-    + '<span class="c-body"><span class="c-top"><b>' + name + '</b><span class="c-time">' + (c.lastAt ? timeAgo(c.lastAt) : '') + '</span></span>'
+    + '<span class="c-body"><span class="c-top"><b>' + name + '</b><span class="c-time">' + (c.lastAt ? fmtListTime(c.lastAt) : '') + '</span></span>'
     + '<span class="c-last">' + last + '</span></span>' + badge + '</button>';
 }
 
@@ -454,13 +454,25 @@ function appendMessage(m, scroll) {
   const prev = list.querySelector('.msg:last-of-type');
   const prevDay = prev ? prev.dataset.day : null;
   const day = dayKey(m.created_at);
+  const t = fmtTime(m.created_at);
   if (prevDay !== day) {
+    // Messenger-style date + time label: "Today at 10:24 PM".
     const sep = document.createElement('div');
     sep.className = 'day-sep';
     const today = new Date().toDateString() === day;
     const y = new Date(); y.setDate(y.getDate() - 1);
-    sep.textContent = today ? 'Today' : (y.toDateString() === day ? 'Yesterday' : fmtDate(m.created_at));
+    sep.textContent = today ? 'Today at ' + t : (y.toDateString() === day ? 'Yesterday at ' + t : fmtDate(m.created_at) + ' at ' + t);
     list.append(sep);
+  } else if (prev) {
+    // Same day, but a long pause since the last message: Messenger-style
+    // centred time label ("10:24 PM") between the messages.
+    const gap = new Date(m.created_at) - new Date(prev.dataset.createdAt);
+    if (gap > 20 * 60 * 1000) {
+      const tsep = document.createElement('div');
+      tsep.className = 'time-sep';
+      tsep.textContent = t;
+      list.append(tsep);
+    }
   }
   const div = document.createElement('div');
   div.className = 'msg' + (mine ? ' me' : '');
@@ -469,9 +481,10 @@ function appendMessage(m, scroll) {
   div.dataset.sender = m.sender_id;
   div.dataset.createdAt = m.created_at;
   const ticks = mine ? ticksHtml(m) : '';
-  // Time + delivery ticks live INSIDE the bubble, small at the bottom-right
-  // (WhatsApp style) — no extra line under the message.
-  const foot = '<span class="msg-foot">' + fmtTime(m.created_at) + ticks + '</span>';
+  // Delivery ticks live INSIDE the bubble, small at the bottom-right
+  // (WhatsApp style). Time is NOT on the message itself — it appears as a
+  // Messenger-style centred label between messages instead (see above).
+  const foot = ticks ? '<span class="msg-foot">' + ticks + '</span>' : '';
   div.innerHTML = '<div class="msg-row"><div class="bubble-wrap">'
     + quoteHtml(m)
     + (m.kind === 'voice' ? voiceBubbleHtml(m, foot) : '<span class="bubble">' + esc(m.body || '') + foot + '</span>')

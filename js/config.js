@@ -78,6 +78,19 @@ export function timeAgo(iso) {
 export function fmtTime(iso) {
   return new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
+/* Chat-list time, Messenger/WhatsApp style: today shows the clock time
+   ("10:24 PM"), yesterday "Yesterday", this week the weekday ("Mon"),
+   older the short date ("Nov 16"). */
+export function fmtListTime(iso) {
+  const d = new Date(iso);
+  const now = new Date();
+  if (d.toDateString() === now.toDateString()) return fmtTime(iso);
+  const y = new Date(); y.setDate(y.getDate() - 1);
+  if (d.toDateString() === y.toDateString()) return 'Yesterday';
+  const days = Math.floor((new Date(now.toDateString()) - new Date(d.toDateString())) / 86400000);
+  if (days < 7) return d.toLocaleDateString(undefined, { weekday: 'short' });
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
 export function fmtDate(iso) {
   return new Date(iso).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
 }

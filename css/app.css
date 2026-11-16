@@ -246,6 +246,8 @@ svg.icon { width: 20px; height: 20px; flex: none; }
 /* Voice bubble is a flex column, so the foot aligns itself to the end. */
 .bubble.voice-bubble .msg-foot { float: none; align-self: flex-end; margin: 2px 0 0; }
 .day-sep { align-self: center; font-size: 12px; color: var(--muted); background: var(--card); border: 1px solid var(--border); padding: 3px 12px; border-radius: 999px; margin: 8px 0; }
+/* Messenger-style time label between messages: plain centred text, no pill. */
+.time-sep { align-self: center; font-size: 12px; color: var(--muted); margin: 8px 0; }
 .typing-ind { display: flex; align-items: center; gap: 8px; padding: 2px 16px 8px; min-height: 26px; }
 .typing-ind:empty { display: none; }
 /* Typing: avatar + three dots waving in sequence, no name text. */
