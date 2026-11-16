@@ -968,8 +968,8 @@ function showTyping(name) {
   typingVisibleFor = name;
   const el = $('typingInd');
   if (!el) return;
-  // No name text: the peer's avatar + three waving dots, like Messenger.
-  const avatar = activeOther ? avatarHtml(activeOther, 'sm') : '';
+  // No name text: the peer's small avatar + three waving dots, like Messenger.
+  const avatar = activeOther ? avatarHtml(activeOther, 'xs') : '';
   el.innerHTML = avatar + '<span class="typing-dots" aria-label="typing"><span></span><span></span><span></span></span>';
   clearTimeout(typingTimeout);
   typingTimeout = setTimeout(hideTyping, 3000);
