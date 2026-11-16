@@ -17,6 +17,8 @@
   // Apply saved theme before first paint (avoids a flash of the wrong theme).
   try { var t = localStorage.getItem('pingchat-theme'); if (t === 'dark' || t === 'light') document.documentElement.setAttribute('data-theme', t); } catch (e) {}
 </script>
+<script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
+<script type="module" src="js/push.js"></script>
 </head>
 <body>
 <!-- ======================= AUTH VIEWS (signed out) ======================= -->

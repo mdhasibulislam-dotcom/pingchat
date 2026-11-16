@@ -12,6 +12,7 @@ import { initCalls, endCallIfActive, renderCallFriends } from './calls.js';
 import { initPeople, loadPeople } from './people.js';
 import { initProfile, loadProfile } from './profile.js';
 import { initSettings, loadSettings } from './settings.js';
+import { initPush, setPushUser } from './push.js';
 
 const AUTH_VIEWS = ['login', 'register', 'reset'];
 const APP_VIEWS = ['chats', 'chat', 'calls', 'people', 'profile', 'settings'];
@@ -141,6 +142,8 @@ function registerServiceWorker() {
 async function setupUser(user) {
   PC.state.me = user;
   PC.state.profile = await ensureProfile(user);
+  // Link this device's push subscription to the signed-in user (OneSignal).
+  setPushUser(user.id, PC.state.profile && PC.state.profile.username);
   renderMeCard();
   initPresence(user);
   initCalls(user);
@@ -156,6 +159,7 @@ async function boot() {
   booted = true;
   initTheme();
   registerServiceWorker();
+  initPush(); // OneSignal web push (best-effort; never blocks boot)
 
   // Static icons in the shell.
   $('searchIcon').innerHTML = icon('search', 18);

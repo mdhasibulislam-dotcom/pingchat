@@ -3,6 +3,7 @@
  */
 import { sb, PC, toast, friendlyError, icon } from './config.js';
 import { showMsg } from './ui.js';
+import { clearPushUser } from './push.js';
 
 const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 const usernameRe = /^[a-z0-9_]{3,20}$/;
@@ -42,6 +43,7 @@ export async function ensureProfile(user) {
 
 export async function logout() {
   try { await sb.auth.signOut(); } catch (e) { /* ignore */ }
+  clearPushUser(); // unlink this device's push subscription from the user
   PC.state.me = null;
   PC.state.profile = null;
   location.hash = '#/login';

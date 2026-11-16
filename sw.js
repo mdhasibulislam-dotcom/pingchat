@@ -1,3 +1,15 @@
+/* OneSignal web push (v16) shares this worker: the OneSignal worker code
+ * is loaded into PingChat's own PWA service worker so push and the PWA
+ * keep one worker at the /pingchat/ scope. Guarded: if the OneSignal CDN
+ * is unreachable the PWA must keep working, so a failed import only
+ * disables push. The SDK is told to use this file via serviceWorkerPath
+ * in js/push.js. */
+try {
+  importScripts('https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.sw.js');
+} catch (e) {
+  /* Push unavailable; the PWA offline shell below still works. */
+}
+
 /* PingChat v2 — service worker: offline app-shell cache.
  *
  * Cache-first for the app shell (HTML/CSS/JS/icons/manifest), network-only
