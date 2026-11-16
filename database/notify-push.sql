@@ -14,16 +14,21 @@
 -- The push is sent from the database itself (Postgres trigger + pg_net),
 -- so it works even when the recipient's app is closed. No server needed.
 --
--- SETUP — DO THIS ONCE, BEFORE RUNNING THE FILE
+-- SETUP — FRESH INSTALL ONLY (first time ever)
 -- 1. OneSignal dashboard > Settings > Keys & IDs > API keys > "Add key"
 --    (create an APP API key). Copy the key value — it starts with
 --    "os_v2_app_" and is shown ONLY ONCE. (The "Key ID" column is NOT
 --    the key; using it gives a 401 error.)
--- 2. Replace ONLY the placeholder 'PASTE_YOUR_ONESIGNAL_REST_API_KEY_HERE'
---    in the function below with that key value.
--- 3. Run this WHOLE file once in the Supabase SQL Editor.
+-- 2. Run this line once in the SQL Editor (put your key in place of ...):
+--      INSERT INTO public.onesignal_config(api_key) VALUES ('os_v2_app_...');
+-- 3. Then run this WHOLE file once.
+-- ALREADY RUN BEFORE? Just paste this whole file and click Run. The key
+-- is saved in the database and carried over automatically — you do NOT
+-- have to paste the key again.
 -- NEVER commit the real key to git. If the key leaks, rotate it in
--- OneSignal (Settings > Keys & IDs) and re-run this file with the new key.
+-- OneSignal (Settings > Keys & IDs), delete the saved key with
+--   DELETE FROM public.onesignal_config;
+-- and save the new key with the INSERT line above, then re-run this file.
 --
 -- HOW TO CHECK IT WORKED
 -- Send a test message from one account to another, wait a few seconds,
@@ -54,11 +59,47 @@
 CREATE EXTENSION IF NOT EXISTS pg_net WITH SCHEMA extensions;
 
 -- ============================================================
+-- 0. API KEY STORAGE — the key lives in a tiny table, not in this file.
+-- Re-running this file never needs the key pasted again.
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS public.onesignal_config (api_key text);
+-- Nobody may read the key through the app API: RLS on, no policies.
+-- The push functions below run as the database owner, so they can read it.
+ALTER TABLE public.onesignal_config ENABLE ROW LEVEL SECURITY;
+
+-- One-time migration: if this table is empty, copy the key out of the
+-- helper function you already ran before (it is stored inside it), so you
+-- never have to paste the key again. Safe to run repeatedly.
+DO $$
+DECLARE
+  v_def text;
+  v_key text;
+BEGIN
+  IF EXISTS (SELECT 1 FROM public.onesignal_config) THEN
+    RETURN;
+  END IF;
+  SELECT pg_get_functiondef(p.oid) INTO v_def
+  FROM pg_proc p
+  JOIN pg_namespace n ON n.oid = p.pronamespace
+  WHERE n.nspname = 'public' AND p.proname = 'onesignal_send_push'
+  ORDER BY p.oid DESC LIMIT 1;
+  IF v_def IS NULL THEN
+    RETURN;
+  END IF;
+  v_key := substring(v_def from 'v_api_key[^'']*''([^'']+)''');
+  IF v_key IS NOT NULL AND v_key <> '' AND v_key <> 'PASTE_YOUR_ONESIGNAL_REST_API_KEY_HERE' THEN
+    INSERT INTO public.onesignal_config(api_key) VALUES (v_key);
+  END IF;
+END $$;
+
+-- ============================================================
 -- 2. HELPER — send one push to one user (by Supabase user id)
 -- The app logs each user into OneSignal with their Supabase user id as
 -- the external_id (OneSignal.login), so include_aliases.external_id
--- targets exactly that user. If the API key placeholder was never
--- replaced, this does nothing instead of sending failing requests.
+-- targets exactly that user. The API key is read from
+-- public.onesignal_config; if no key is saved yet, this does nothing
+-- instead of sending failing requests.
 -- A push failure can never break anything: every error is swallowed.
 -- ============================================================
 
@@ -81,15 +122,19 @@ SECURITY DEFINER
 SET search_path = public, extensions
 AS $$
 DECLARE
-  -- >>>>>> REPLACE ONLY THIS PLACEHOLDER with your OneSignal App API key <<<<<<
-  v_api_key constant text := 'PASTE_YOUR_ONESIGNAL_REST_API_KEY_HERE';
+  -- The key is read from public.onesignal_config (saved once, survives
+  -- re-runs of this file). The value below is only a fresh-install
+  -- fallback and is never used once the table has the key.
+  v_api_key text := 'PASTE_YOUR_ONESIGNAL_REST_API_KEY_HERE';
   v_app_id  constant text := 'da3c98f6-d518-41d1-807e-0e8b77c702d6';
   v_auth    text;
   v_payload jsonb;
   v_headers jsonb;
 BEGIN
+  -- Read the saved key (if any). With no rows SELECT INTO leaves NULL.
+  SELECT api_key INTO v_api_key FROM public.onesignal_config LIMIT 1;
   -- Not configured yet: do nothing.
-  IF v_api_key = 'PASTE_YOUR_ONESIGNAL_REST_API_KEY_HERE' OR v_api_key = '' THEN
+  IF v_api_key IS NULL OR v_api_key = 'PASTE_YOUR_ONESIGNAL_REST_API_KEY_HERE' OR v_api_key = '' THEN
     RETURN;
   END IF;
 
