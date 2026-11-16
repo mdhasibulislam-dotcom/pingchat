@@ -732,7 +732,7 @@ CREATE POLICY "avatars_delete_own" ON storage.objects
 
 -- ---- message_reactions RLS ----
 ALTER TABLE public.message_reactions ENABLE ROW LEVEL SECURITY;
-GRANT SELECT, INSERT, DELETE ON public.message_reactions TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.message_reactions TO authenticated;
 DROP POLICY IF EXISTS "reactions_select_participant" ON public.message_reactions;
 CREATE POLICY "reactions_select_participant" ON public.message_reactions
   FOR SELECT TO authenticated USING (
@@ -751,6 +751,11 @@ CREATE POLICY "reactions_insert_own" ON public.message_reactions
 DROP POLICY IF EXISTS "reactions_delete_own" ON public.message_reactions;
 CREATE POLICY "reactions_delete_own" ON public.message_reactions
   FOR DELETE TO authenticated USING (user_id = auth.uid());
+-- PostgREST upsert (toggle reaction) needs UPDATE privilege + policy:
+-- without it, changing your reaction to a different emoji fails.
+DROP POLICY IF EXISTS "reactions_update_own" ON public.message_reactions;
+CREATE POLICY "reactions_update_own" ON public.message_reactions
+  FOR UPDATE TO authenticated USING (user_id = auth.uid()) WITH CHECK (user_id = auth.uid());
 CREATE INDEX IF NOT EXISTS idx_reactions_message
   ON public.message_reactions (message_id);
 

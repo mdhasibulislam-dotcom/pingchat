@@ -8,10 +8,11 @@ import { ICE_SERVERS, CALL_TIMEOUT_MS } from './call-config.js';
 import { esc, formatDuration } from './ui.js';
 import { getOrCreateConversation } from './chats.js';
 import { setCallHistoryRefresher } from './app.js';
-import { loadFriendProfiles, checkBlockDirection, isBlockedEither } from './friends.js';
+import { loadFriendProfiles, loadFriendships, checkBlockDirection, isBlockedEither } from './friends.js';
 
 let me = null;
 let myChannel = null;
+let callsInitialized = false;
 const peerChannels = new Map();
 let current = null; // active or ringing call state
 let ringCtx = null;
@@ -23,7 +24,17 @@ const $ = (id) => document.getElementById(id);
 
 export function initCalls(user) {
   me = user;
+  if (callsInitialized) return;
+  callsInitialized = true;
   setCallHistoryRefresher(renderCallHistory);
+  // If the tab is closed while dialling, tell the other side the call
+  // was cancelled instead of leaving them ringing forever.
+  window.addEventListener('beforeunload', () => {
+    if (current && current.status === 'calling') {
+      sendSignal(current.peerId, 'call-cancel', { callId: current.callId });
+      updateCall(current.callId, { status: 'missed' });
+    }
+  });
   if (myChannel) return;
   myChannel = sb.channel('calls:' + user.id)
     .on('broadcast', { event: 'call-offer' }, ({ payload }) => onOffer(payload))
@@ -35,20 +46,45 @@ export function initCalls(user) {
     .subscribe();
 }
 
-/* ---------- signaling transport ---------- */
+/* ---------- signaling transport ----------
+ * supabase-js v2: `await ch.subscribe()` does NOT wait for the SUBSCRIBED
+ * state — it resolves immediately, so the first signals sent on a fresh
+ * channel were silently lost and calls usually never connected. This waits
+ * for SUBSCRIBED (with a timeout + error path) and only caches the channel
+ * after a successful subscription; a failed channel is never cached. */
 async function peerChannel(peerId) {
   if (peerChannels.has(peerId)) return peerChannels.get(peerId);
   const ch = sb.channel('calls:' + peerId);
+  try {
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Signaling channel timed out')), 10000);
+      ch.subscribe((status) => {
+        if (status === 'SUBSCRIBED') { clearTimeout(timer); resolve(); }
+        else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+          clearTimeout(timer);
+          reject(new Error('Signaling channel failed: ' + status));
+        }
+      });
+    });
+  } catch (e) {
+    peerChannels.delete(peerId);
+    try { ch.unsubscribe(); } catch (err) {}
+    throw e;
+  }
   peerChannels.set(peerId, ch);
-  await ch.subscribe();
   return ch;
 }
 async function sendSignal(peerId, event, payload) {
   try {
     const ch = await peerChannel(peerId);
-    await ch.send({ type: 'broadcast', event, payload });
+    const res = await ch.send({ type: 'broadcast', event, payload });
+    if (res !== 'ok') {
+      console.warn('signal send failed', event, res);
+      toast('Could not reach the other side. Check your connection and try again.', 'error');
+    }
   } catch (e) {
     console.warn('signal send failed', event, e);
+    toast('Could not reach the other side. Check your connection and try again.', 'error');
   }
 }
 
@@ -446,6 +482,10 @@ export async function renderCallFriends() {
   const list = $('callFriendsList');
   if (!list || !me) return;
   let friendProfiles = [];
+  // Refresh the friendship cache first: loadFriendProfiles() reads the
+  // cache, which may be stale/empty, so accepted friends with no
+  // conversation yet would otherwise never appear here.
+  try { await loadFriendships(); } catch (e) { /* ignore */ }
   try { friendProfiles = await loadFriendProfiles(); } catch (e) { /* ignore */ }
   let partnerIds = [];
   try {
@@ -519,15 +559,21 @@ export async function renderCallHistory() {
     if (!pr.error) profilesById = new Map((pr.data || []).map((p) => [p.id, p]));
   } catch (e) {}
   const statusLabel = { ringing: 'Ringing', accepted: 'Accepted', declined: 'Declined', missed: 'Missed', ended: 'Ended' };
+  // A 'ringing' row older than ~60s is stale (caller closed the tab, the
+  // network dropped, or the timeout never fired) — show it as missed
+  // instead of leaving it ringing forever in history.
+  const STALE_RINGING_MS = 60000;
   list.innerHTML = rows.map((r) => {
     const otherId = r.caller_id === me.id ? r.callee_id : r.caller_id;
     const other = profilesById.get(otherId) || { id: otherId, username: 'user', full_name: 'PingChat user' };
     const outgoing = r.caller_id === me.id;
-    const missed = r.status === 'missed' || (r.status === 'ringing' && outgoing === false);
+    const isStaleRinging = r.status === 'ringing' && (Date.now() - new Date(r.created_at).getTime() > STALE_RINGING_MS);
+    const displayStatus = isStaleRinging ? 'missed' : r.status;
+    const missed = displayStatus === 'missed';
     const dur = r.duration_seconds ? ' · ' + formatDuration(r.duration_seconds) : '';
-    const label = (outgoing ? 'Outgoing ' : 'Incoming ') + (r.kind === 'video' ? 'video' : 'audio') + ' call — ' + (statusLabel[r.status] || r.status) + dur;
+    const label = (outgoing ? 'Outgoing ' : 'Incoming ') + (r.kind === 'video' ? 'video' : 'audio') + ' call — ' + (statusLabel[displayStatus] || displayStatus) + dur;
     return '<div class="call-row">'
-      + '<span class="c-ic' + (r.status === 'missed' ? ' missed' : '') + '">' + icon(r.status === 'missed' ? 'phoneMissed' : (r.kind === 'video' ? 'video' : 'phone'), 20) + '</span>'
+      + '<span class="c-ic' + (missed ? ' missed' : '') + '">' + icon(missed ? 'phoneMissed' : (r.kind === 'video' ? 'video' : 'phone'), 20) + '</span>'
       + avatarHtml(other, 'sm')
       + '<span class="c-body"><b>' + esc(other.full_name || other.username) + '</b><span>' + esc(label) + ' · ' + timeAgo(r.created_at) + '</span></span>'
       + '<button class="btn btn-ghost btn-sm" data-callback="' + otherId + '" data-callkind="' + r.kind + '" type="button">Call back</button>'

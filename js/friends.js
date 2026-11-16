@@ -13,10 +13,11 @@
  */
 import { sb, PC, toast, avatarHtml, icon } from './config.js';
 import { esc } from './ui.js';
-import { getOrCreateConversation, getConversationIdWith } from './chats.js';
+import { getOrCreateConversation, getConversationIdWith, refreshConversations, openConversation } from './chats.js';
 import { startCall } from './calls.js';
 
 let me = null;
+let friendsInitialized = false;
 let cache = new Map(); // otherUserId -> 'none' | 'pending_out' | 'pending_in' | 'friends' | 'declined'
 let listeners = [];
 let feedChannel = null;
@@ -29,6 +30,10 @@ const $ = (id) => document.getElementById(id);
 
 export function initFriends(user) {
   me = user;
+  // setupUser() can run twice (boot + SIGNED_IN): without this guard every
+  // listener below binds twice.
+  if (friendsInitialized) return;
+  friendsInitialized = true;
   $('pvClose').innerHTML = icon('x', 18);
   $('pvClose').addEventListener('click', closeProfilePreview);
   $('profileModal').addEventListener('click', (e) => { if (e.target === $('profileModal')) closeProfilePreview(); });
@@ -384,6 +389,12 @@ async function renderPreviewExtra(profile) {
       catch (e) { toast('Could not clear chat. Check your connection.', 'error'); return; }
       if (r.error) { toast('Could not clear chat: ' + r.error.message, 'error'); return; }
       toast('Chat cleared.', 'success');
+      // Refresh the conversation list, close the modal, and if this chat
+      // is open right now, reload it so its messages disappear at once
+      // (the old code left the cleared messages on screen until reload).
+      refreshConversations();
+      closeProfilePreview();
+      if (PC.state.activeConversationId === convId) openConversation(convId);
     });
   }
   mkRow(isBlockedByMe(profile.id) ? 'Unblock' : 'Block', true, async () => {

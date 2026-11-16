@@ -15,6 +15,7 @@ import {
 } from './friends.js';
 
 let me = null;
+let peopleInitialized = false;
 let people = [];
 let tab = 'all'; // 'all' | 'requests'
 let incoming = [];
@@ -24,6 +25,10 @@ const $ = (id) => document.getElementById(id);
 
 export function initPeople(user) {
   me = user;
+  // setupUser() can run twice (boot + SIGNED_IN): without this guard every
+  // listener below binds twice.
+  if (peopleInitialized) return;
+  peopleInitialized = true;
   initFriends(user);
   $('peopleSearch').addEventListener('input', debounce(() => renderPeople(), 200));
   $('peopleTabAll').addEventListener('click', () => { tab = 'all'; renderPeople(); });

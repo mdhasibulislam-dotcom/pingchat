@@ -6,11 +6,16 @@ import { logout } from './auth.js';
 import { toggleTheme } from './app.js';
 
 let me = null;
+let settingsInitialized = false;
 
 const $ = (id) => document.getElementById(id);
 
 export function initSettings(user) {
   me = user;
+  // setupUser() can run twice (boot + SIGNED_IN): without this guard every
+  // listener below binds twice.
+  if (settingsInitialized) return;
+  settingsInitialized = true;
   $('settingsBackBtn').addEventListener('click', () => { location.hash = '#/profile'; });
   $('settingsThemeRow').addEventListener('click', () => { toggleTheme(); syncThemeRow(); });
   $('privacyToggle').addEventListener('click', onPrivacyToggle);

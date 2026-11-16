@@ -7,11 +7,16 @@ import { showMsg } from './ui.js';
 const usernameRe = /^[a-z0-9_]{3,20}$/;
 const MAX_PHOTO_BYTES = 2 * 1024 * 1024; // bucket limit is 2 MB
 let me = null;
+let profileInitialized = false;
 
 const $ = (id) => document.getElementById(id);
 
 export function initProfile(user) {
   me = user;
+  // setupUser() can run twice (boot + SIGNED_IN): without this guard every
+  // listener below binds twice.
+  if (profileInitialized) return;
+  profileInitialized = true;
   $('avatarUploadBtn').innerHTML = icon('camera', 18);
   $('avatarUploadBtn').addEventListener('click', () => $('avatarFileInput').click());
   $('avatarFileInput').addEventListener('change', onPhotoChosen);

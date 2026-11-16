@@ -6,6 +6,7 @@ import { startCall } from './calls.js';
 import { openProfilePreview } from './friends.js';
 
 let me = null;
+let chatsInitialized = false;
 let conversations = [];       // [{id, other, lastMessage, unread, lastAt}]
 let activeId = null;
 let activeOther = null;
@@ -33,6 +34,10 @@ const $ = (id) => document.getElementById(id);
 
 export function initChats(user) {
   me = user;
+  // setupUser() can run twice (boot + SIGNED_IN): without this guard every
+  // listener below binds twice, so messages send twice and calls start twice.
+  if (chatsInitialized) return;
+  chatsInitialized = true;
   $('convSearch').addEventListener('input', debounce(() => renderConversationLists(), 200));
   $('composerForm').addEventListener('submit', onSend);
   $('msgInput').addEventListener('input', onTypingInput);
@@ -110,12 +115,33 @@ export async function refreshConversations() {
   const myRead = new Map(parts.map((p) => [p.conversation_id, p.last_read_at]));
   if (!convIds.length) { conversations = []; renderConversationLists(); return; }
 
-  const [allPartsR, msgsR, convsR] = await Promise.all([
+  const [allPartsR, convsR] = await Promise.all([
     sb.from('conversation_participants').select('conversation_id, user_id, last_read_at').in('conversation_id', convIds),
-    sb.from('messages').select('id, conversation_id, sender_id, body, created_at, kind').in('conversation_id', convIds).order('created_at', { ascending: false }).limit(500),
     sb.from('conversations').select('id, created_at, last_message_at').in('id', convIds)
   ]);
-  if (allPartsR.error || msgsR.error || convsR.error) { console.warn('load conversations detail failed'); return; }
+  if (allPartsR.error || convsR.error) { console.warn('load conversations detail failed'); return; }
+
+  // One query per conversation for its latest message + unread count.
+  // The old code fetched 500 messages across ALL conversations, so quiet
+  // conversations lost their last message (and unread counts) once the
+  // 500 cap was hit by busier chats.
+  const perConv = await Promise.all(convIds.map(async (cid) => {
+    const readAt = myRead.get(cid);
+    let unreadQ = sb.from('messages').select('id', { count: 'exact', head: true })
+      .eq('conversation_id', cid).neq('sender_id', me.id);
+    if (readAt) unreadQ = unreadQ.gt('created_at', readAt);
+    const [lastR, unreadR] = await Promise.all([
+      sb.from('messages').select('id, conversation_id, sender_id, body, created_at, kind')
+        .eq('conversation_id', cid).order('created_at', { ascending: false }).limit(1),
+      unreadQ
+    ]);
+    return {
+      cid,
+      lastMessage: (!lastR.error && lastR.data && lastR.data[0]) ? lastR.data[0] : null,
+      unread: (!unreadR.error && typeof unreadR.count === 'number') ? unreadR.count : 0
+    };
+  }));
+  const lastByConv = new Map(perConv.map((p) => [p.cid, p]));
 
   const otherIds = [...new Set((allPartsR.data || []).map((p) => p.user_id).filter((id) => id !== me.id))];
   let profilesById = new Map();
@@ -123,22 +149,15 @@ export async function refreshConversations() {
     const pr = await sb.from('profiles').select('id, username, full_name, bio, avatar_url, is_public, created_at').in('id', otherIds);
     if (!pr.error) profilesById = new Map((pr.data || []).map((p) => [p.id, p]));
   }
-  const msgsByConv = new Map();
-  (msgsR.data || []).forEach((m) => {
-    if (!msgsByConv.has(m.conversation_id)) msgsByConv.set(m.conversation_id, []);
-    msgsByConv.get(m.conversation_id).push(m);
-  });
   const convMeta = new Map((convsR.data || []).map((c) => [c.id, c]));
 
   conversations = convIds.map((cid) => {
     const others = (allPartsR.data || []).filter((p) => p.conversation_id === cid && p.user_id !== me.id);
     const other = others.length ? profilesById.get(others[0].user_id) || { id: others[0].user_id, username: 'user', full_name: 'PingChat user' } : null;
-    const msgs = msgsByConv.get(cid) || [];
-    const lastMessage = msgs[0] || null;
-    const readAt = myRead.get(cid);
-    const unread = msgs.filter((m) => m.sender_id !== me.id && (!readAt || new Date(m.created_at) > new Date(readAt))).length;
+    const entry = lastByConv.get(cid) || { lastMessage: null, unread: 0 };
+    const lastMessage = entry.lastMessage;
     const meta = convMeta.get(cid);
-    return { id: cid, other, lastMessage, unread, lastAt: lastMessage ? lastMessage.created_at : (meta ? (meta.last_message_at || meta.created_at) : null) };
+    return { id: cid, other, lastMessage, unread: entry.unread, lastAt: lastMessage ? lastMessage.created_at : (meta ? (meta.last_message_at || meta.created_at) : null) };
   }).sort((a, b) => new Date(b.lastAt || 0) - new Date(a.lastAt || 0));
 
   renderConversationLists();
@@ -216,9 +235,15 @@ export async function openConversation(id) {
   activeOther = conv ? conv.other : null;
 
   // Load the other participant + their read position.
+  // If the query succeeds but has no row for me, I am not part of this
+  // conversation — show an error and go back instead of a blank window.
+  let partsOk = false;
+  let isParticipant = false;
   try {
     const parts = await sb.from('conversation_participants').select('user_id, last_read_at').eq('conversation_id', id);
     if (!parts.error) {
+      partsOk = true;
+      isParticipant = (parts.data || []).some((p) => p.user_id === me.id);
       const otherPart = (parts.data || []).find((p) => p.user_id !== me.id);
       otherLastReadAt = otherPart ? otherPart.last_read_at : null;
       if (otherPart && !activeOther) {
@@ -227,6 +252,12 @@ export async function openConversation(id) {
       }
     }
   } catch (e) { console.warn('load participants failed', e); }
+  if (partsOk && !isParticipant) {
+    toast('You are not part of this conversation.', 'error');
+    closeChat();
+    location.hash = '#/chats';
+    return;
+  }
 
   renderChatHeader();
   $('msgList').innerHTML = '<div class="empty">Loading messages…</div>';
@@ -700,28 +731,30 @@ async function startVoiceRecording() {
   }
   const chunks = [];
   recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+  // Capture this recording's state in a local const: the old code read the
+  // module-level recState inside onstop, so starting a second recording
+  // before the first one's onstop fired wiped the first clip's state.
+  const state = { stream, recorder, chunks, mime, startAt: Date.now(), timerId: null, stopId: null, convId: activeId };
   recorder.onstop = () => {
-    const convId = recState.convId;
-    const startAt = recState.startAt;
-    const blob = new Blob(chunks, { type: mime || 'audio/webm' });
-    const duration = (Date.now() - startAt) / 1000;
+    const blob = new Blob(chunks, { type: baseMime(mime) });
+    const duration = (Date.now() - state.startAt) / 1000;
     stream.getTracks().forEach((t) => t.stop());
-    recState = null;
+    if (recState === state) recState = null;
     $('voiceRecBar').hidden = true;
     // If the user left the chat while recording, discard the clip
     // instead of showing a preview that could be sent to the wrong chat.
-    if (convId !== activeId) return;
+    if (state.convId !== activeId) return;
     showVoicePreview(blob, mime, duration);
   };
-  recState = { stream, recorder, chunks, mime, startAt: Date.now(), timerId: null, stopId: null, convId: activeId };
+  recState = state;
   recorder.start(250);
   $('voiceRecBar').hidden = false;
   $('voiceRecTimer').textContent = '00:00';
-  recState.timerId = setInterval(() => {
-    if (!recState) return;
-    $('voiceRecTimer').textContent = formatDuration((Date.now() - recState.startAt) / 1000);
+  state.timerId = setInterval(() => {
+    if (recState !== state) return;
+    $('voiceRecTimer').textContent = formatDuration((Date.now() - state.startAt) / 1000);
   }, 500);
-  recState.stopId = setTimeout(() => { if (recState) stopVoiceRecording(); }, MAX_VOICE_SECONDS * 1000);
+  state.stopId = setTimeout(() => { if (recState === state) stopVoiceRecording(); }, MAX_VOICE_SECONDS * 1000);
 }
 
 function stopVoiceRecording() {
@@ -782,6 +815,12 @@ function extForMime(mime) {
   return '.webm';
 }
 
+// Strip the codec parameter: the storage bucket's MIME allowlist accepts
+// 'audio/webm' but rejects 'audio/webm;codecs=opus'.
+function baseMime(mime) {
+  return String(mime || 'audio/webm').split(';')[0].trim() || 'audio/webm';
+}
+
 async function sendVoicePreview() {
   if (!previewState || !activeId) return;
   const btn = $('voicePrevSend');
@@ -789,7 +828,7 @@ async function sendVoicePreview() {
   const path = me.id + '/' + (crypto.randomUUID ? crypto.randomUUID() : 'v-' + Date.now()) + extForMime(previewState.mime);
   try {
     const up = await sb.storage.from('voice-messages').upload(path, previewState.blob, {
-      contentType: previewState.mime || 'audio/webm', upsert: false
+      contentType: baseMime(previewState.mime), upsert: false
     });
     if (up.error) throw up.error;
     const { data } = sb.storage.from('voice-messages').getPublicUrl(path);
@@ -876,10 +915,12 @@ async function onVoiceEnded(m) {
   // Pausing or stopping early never fires 'ended', so it never counts.
   // The sender playing their own voice does NOT delete it.
   if (!m.view_once || m.sender_id === me.id || consumedVoiceIds.has(m.id)) return;
-  consumedVoiceIds.add(m.id);
   try {
     const r = await sb.rpc('consume_voice_message', { p_message_id: m.id });
     if (!r.error && r.data === true) {
+      // Only mark consumed AFTER the server confirms the delete, so a
+      // failed consume can be retried by listening again.
+      consumedVoiceIds.add(m.id);
       if (m.media_path) {
         try { await sb.storage.from('voice-messages').remove([m.media_path]); } catch (e) { /* best-effort */ }
       }
@@ -890,11 +931,25 @@ async function onVoiceEnded(m) {
 }
 
 /* ---------- typing indicator ---------- */
+// Debounced + throttled: the old code broadcast on every keystroke. Now we
+// wait 300ms after the last keystroke and send at most once per 2.5s while
+// typing continues (the peer hides the indicator after 3s of silence).
+let typingDebounceTimer = null;
+let typingLastSentAt = 0;
 function onTypingInput() {
   if (!typingChannel || !activeOther) return;
-  typingChannel.send({ type: 'broadcast', event: 'typing', payload: { user_id: me.id, name: PC.state.profile?.full_name || 'Someone' } }).catch(() => {});
+  clearTimeout(typingDebounceTimer);
+  typingDebounceTimer = setTimeout(() => {
+    if (!typingChannel || !activeOther) return;
+    const now = Date.now();
+    if (now - typingLastSentAt < 2500) return; // already announced recently
+    typingLastSentAt = now;
+    typingChannel.send({ type: 'broadcast', event: 'typing', payload: { user_id: me.id, name: PC.state.profile?.full_name || 'Someone' } }).catch(() => {});
+  }, 300);
 }
 function stopTypingBroadcast() {
+  typingLastSentAt = 0;
+  clearTimeout(typingDebounceTimer);
   if (!typingChannel) return;
   typingChannel.send({ type: 'broadcast', event: 'typing-stop', payload: { user_id: me.id } }).catch(() => {});
 }

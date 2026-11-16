@@ -6,6 +6,7 @@ import { showMsg } from './ui.js';
 
 const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 const usernameRe = /^[a-z0-9_]{3,20}$/;
+let authInitialized = false;
 
 function busy(btn, on, label) {
   if (!btn) return;
@@ -30,7 +31,11 @@ export async function ensureProfile(user) {
     const { data: retry } = await sb.from('profiles')
       .insert({ id: user.id, username: 'user_' + user.id.replace(/-/g, '').slice(0, 10), full_name: meta.full_name || '' })
       .select().single();
-    return retry || null;
+    if (retry) return retry;
+    // Both inserts failed: the trigger may have created the row after our
+    // first read, so re-select before giving up and returning null.
+    const { data: again } = await sb.from('profiles').select('*').eq('id', user.id).maybeSingle();
+    return again || null;
   }
   return ins;
 }
@@ -47,6 +52,9 @@ export function isRecoveryUrl() {
 }
 
 export function initAuth() {
+  // Bind once: a second bind would double-submit every auth form.
+  if (authInitialized) return;
+  authInitialized = true;
   // Show/hide password toggles (all auth forms).
   document.querySelectorAll('[data-toggle-pass]').forEach((btn) => {
     btn.innerHTML = icon('eye', 18);
