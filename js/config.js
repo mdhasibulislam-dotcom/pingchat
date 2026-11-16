@@ -51,6 +51,7 @@ export function friendlyError(err) {
   if (/rate limit|too many/i.test(m)) return 'Too many attempts. Please wait a minute and try again.';
   if (/Failed to fetch|NetworkError/i.test(m)) return 'Network problem. Check your connection and try again.';
   if (/duplicate key|23505|profiles_username_key/i.test(m)) return 'That username is already taken.';
+  if (/provider (is )?not enabled|unsupported provider/i.test(m)) return 'Google sign-in is not turned on for this app yet. Please log in with email instead.';
   if (/Database error saving new user/i.test(m)) return 'Could not create your account. The username may already be taken.';
   return m;
 }

@@ -128,6 +128,14 @@ svg.icon { width: 20px; height: 20px; flex: none; }
 .auth-card .sub { margin: 0 0 20px; color: var(--muted); }
 .auth-foot { text-align: center; color: var(--muted); font-size: 13px; margin-top: 22px; }
 
+/* ---------- Google sign-in ---------- */
+.auth-divider { display: flex; align-items: center; gap: 12px; margin: 18px 0 14px; color: var(--muted); font-size: 13px; }
+.auth-divider::before, .auth-divider::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+.btn-google { background: var(--card); border-color: var(--border); color: var(--text); }
+.btn-google:hover { background: var(--card-2); }
+.btn-google:disabled { opacity: .6; cursor: not-allowed; }
+.btn-google .google-g { width: 18px; height: 18px; flex: none; }
+
 /* ---------- app layout ---------- */
 .layout { display: flex; height: 100dvh; }
 .sidebar {

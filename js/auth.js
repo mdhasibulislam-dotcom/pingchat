@@ -11,26 +11,62 @@ let authInitialized = false;
 
 function busy(btn, on, label) {
   if (!btn) return;
-  if (on) { btn.dataset.label = btn.textContent; btn.textContent = label || 'Please wait…'; btn.disabled = true; }
-  else { btn.textContent = btn.dataset.label || btn.textContent; btn.disabled = false; }
+  // innerHTML (not textContent) so buttons with an icon keep it on restore.
+  if (on) { btn.dataset.label = btn.innerHTML; btn.textContent = label || 'Please wait…'; btn.disabled = true; }
+  else { btn.innerHTML = btn.dataset.label || btn.innerHTML; btn.disabled = false; }
+}
+
+/* Pick a username for a user who signed up without one (e.g. Google).
+ * Email users always carry meta.username, so this only runs for OAuth. */
+async function usernameForNewUser(user, meta) {
+  let uname = String(meta.username || '').toLowerCase();
+  if (usernameRe.test(uname)) return uname;
+  // Derive from the email prefix: hasibul@gmail.com -> hasibul.
+  const base = String(user.email || '').split('@')[0].toLowerCase()
+    .replace(/[^a-z0-9_]/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '').slice(0, 16);
+  if (base.length >= 3) {
+    try {
+      const chk = await sb.rpc('is_username_available', { p_username: base });
+      if (chk.data === true) return base;
+    } catch (e) { /* fall through to a suffixed name */ }
+    const suffixed = (base + '_' + Math.random().toString(36).slice(2, 6)).slice(0, 20);
+    if (usernameRe.test(suffixed)) {
+      try {
+        const chk2 = await sb.rpc('is_username_available', { p_username: suffixed });
+        if (chk2.data === true) return suffixed;
+      } catch (e) { /* fall through */ }
+    }
+  }
+  return 'user_' + user.id.replace(/-/g, '').slice(0, 10);
 }
 
 /* Make sure the signed-in user has a profile row. The SQL trigger
  * handle_new_user() normally creates it; this is the fallback. */
 export async function ensureProfile(user) {
   const { data, error } = await sb.from('profiles').select('*').eq('id', user.id).maybeSingle();
-  if (data) return data;
   if (error) console.warn('ensureProfile read failed', error);
   const meta = user.user_metadata || {};
-  let uname = String(meta.username || '').toLowerCase();
-  if (!usernameRe.test(uname)) uname = 'user_' + user.id.replace(/-/g, '').slice(0, 10);
+  // Google sends the profile picture as avatar_url (or picture).
+  const avatar = meta.avatar_url || meta.picture || '';
+  if (data) {
+    // The trigger creates the row without a photo, so backfill the Google
+    // picture when the row has none (profiles_update_self allows this).
+    if (!data.avatar_url && avatar) {
+      const { data: upd } = await sb.from('profiles')
+        .update({ avatar_url: avatar }).eq('id', user.id).select().single();
+      if (upd) return upd;
+    }
+    return data;
+  }
+  const fullName = meta.full_name || meta.name || (user.email || '').split('@')[0];
+  const uname = await usernameForNewUser(user, meta);
   const { data: ins, error: insErr } = await sb.from('profiles')
-    .insert({ id: user.id, username: uname, full_name: meta.full_name || (user.email || '').split('@')[0] })
+    .insert({ id: user.id, username: uname, full_name: fullName, avatar_url: avatar || null })
     .select().single();
   if (insErr) {
     // Username taken (race with the trigger) — fall back to a generated one.
     const { data: retry } = await sb.from('profiles')
-      .insert({ id: user.id, username: 'user_' + user.id.replace(/-/g, '').slice(0, 10), full_name: meta.full_name || '' })
+      .insert({ id: user.id, username: 'user_' + user.id.replace(/-/g, '').slice(0, 10), full_name: fullName, avatar_url: avatar || null })
       .select().single();
     if (retry) return retry;
     // Both inserts failed: the trigger may have created the row after our
@@ -88,6 +124,28 @@ export function initAuth() {
     if (r.error) return showMsg(out, friendlyError(r.error));
     location.hash = '#/chats';
   });
+
+  /* ------------------------- Continue with Google ------------------------- */
+  async function signInWithGoogle(out, btn) {
+    showMsg(out, '');
+    busy(btn, true, 'Redirecting to Google…');
+    let r;
+    try {
+      r = await sb.auth.signInWithOAuth({
+        provider: 'google',
+        options: { redirectTo: 'https://mdhasibulislam-dotcom.github.io/pingchat/' }
+      });
+    } catch (err) { busy(btn, false); return showMsg(out, friendlyError(err)); }
+    busy(btn, false);
+    if (r.error) return showMsg(out, friendlyError(r.error));
+    // Success: Supabase redirects the browser to Google. The return lands
+    // on the app root and the client (detectSessionInUrl) picks up the
+    // session, then the app routes to #/chats.
+  }
+  const googleLoginBtn = document.getElementById('googleLoginBtn');
+  if (googleLoginBtn) googleLoginBtn.addEventListener('click', () => signInWithGoogle(document.getElementById('loginMsg'), googleLoginBtn));
+  const googleRegisterBtn = document.getElementById('googleRegisterBtn');
+  if (googleRegisterBtn) googleRegisterBtn.addEventListener('click', () => signInWithGoogle(document.getElementById('regMsg'), googleRegisterBtn));
 
   /* ------------------------- register ------------------------- */
   const unameInput = document.getElementById('regUsername');
