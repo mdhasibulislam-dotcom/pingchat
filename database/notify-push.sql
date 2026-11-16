@@ -108,7 +108,9 @@ BEGIN
 
   -- pg_net is async: this only queues the request, it never waits for
   -- OneSignal, so it cannot slow down the message/call insert.
-  PERFORM extensions.http_post(
+  -- NOTE: pg_net's functions live in the `net` schema (not `extensions`),
+  -- even when the extension is installed WITH SCHEMA extensions.
+  PERFORM net.http_post(
     'https://api.onesignal.com/notifications?c=push',
     v_payload,
     '{}'::jsonb,
