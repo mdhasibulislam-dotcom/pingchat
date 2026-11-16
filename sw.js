@@ -21,7 +21,7 @@ try {
  * any failure degrades to a plain network fetch. Bump CACHE on each release
  * so old caches are dropped on activate.
  */
-const CACHE = 'pingchat-v5';
+const CACHE = 'pingchat-v6';
 const SHELL = [
   './',
   'index.html',

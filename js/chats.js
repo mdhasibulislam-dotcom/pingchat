@@ -51,7 +51,12 @@ export function initChats(user) {
   $('voicePrevPlay').addEventListener('click', togglePreviewPlayback);
   $('voicePrevSend').addEventListener('click', sendVoicePreview);
   $('voicePrevCancel').addEventListener('click', cancelVoicePreview);
-  onPresenceChange(() => { renderConversationLists(); renderChatHeader(); });
+  onPresenceChange(() => { renderConversationLists(); renderChatHeader(); renderMessagesTicks(); });
+
+  // Mark read when the chat comes back on screen (seen = actually looking).
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && activeId) markRead();
+  });
 
   // Close the floating message menu on outside click / Escape.
   document.addEventListener('click', (e) => {
@@ -452,9 +457,7 @@ function appendMessage(m, scroll) {
   div.dataset.id = m.id;
   div.dataset.sender = m.sender_id;
   div.dataset.createdAt = m.created_at;
-  const ticks = mine
-    ? '<span class="ticks' + (isRead(m) ? ' read' : '') + '">' + (isRead(m) ? '<span class="seen-badge">✓</span>' : '✓') + '</span>'
-    : '';
+  const ticks = mine ? ticksHtml(m) : '';
   div.innerHTML = '<div class="msg-row"><div class="bubble-wrap">'
     + quoteHtml(m)
     + (m.kind === 'voice' ? voiceBubbleHtml(m) : '<span class="bubble">' + esc(m.body || '') + '</span>')
@@ -465,7 +468,9 @@ function appendMessage(m, scroll) {
   wireMessage(div, m);
   renderReactions(m.id);
   if (scroll) scrollToBottom();
-  if (!mine && m.conversation_id === activeId) markRead();
+  // Seen only when the chat is actually on screen: an open-but-backgrounded
+  // chat must not mark messages read.
+  if (!mine && m.conversation_id === activeId && document.visibilityState === 'visible') markRead();
 }
 
 function wireMessage(div, m) {
@@ -495,13 +500,29 @@ function removeMessageElement(msgId) {
 function isRead(m) {
   return !!otherLastReadAt && new Date(otherLastReadAt) >= new Date(m.created_at);
 }
+// Three tick states: sent (one tick), delivered (two ticks), seen (round badge).
+// Delivered = the message reached the peer's phone, which we know when the
+// peer is online (app connected); offline = sent only.
+// Delivered is sticky within the session: once a message was delivered, it
+// stays double-ticked even if the peer goes offline again.
+const deliveredIds = new Set();
+function tickState(m) {
+  if (isRead(m)) return 'seen';
+  if (deliveredIds.has(m.id)) return 'delivered';
+  if (activeOther && PC.state.online.has(activeOther.id)) { deliveredIds.add(m.id); return 'delivered'; }
+  return 'sent';
+}
+function ticksHtml(m) {
+  const s = tickState(m);
+  if (s === 'seen') return '<span class="ticks read"><span class="seen-badge">✓</span></span>';
+  if (s === 'delivered') return '<span class="ticks">✓✓</span>';
+  return '<span class="ticks">✓</span>';
+}
 function renderMessagesTicks() {
   document.querySelectorAll('#msgList .msg.me').forEach((el) => {
     const t = el.querySelector('.ticks');
     if (!t) return;
-    const read = !!otherLastReadAt && new Date(otherLastReadAt) >= new Date(el.dataset.createdAt);
-    t.classList.toggle('read', read);
-    t.innerHTML = read ? '<span class="seen-badge">✓</span>' : '✓';
+    t.outerHTML = ticksHtml({ id: el.dataset.id, created_at: el.dataset.createdAt });
   });
 }
 function scrollToBottom() {
